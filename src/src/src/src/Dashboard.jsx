@@ -1,0 +1,504 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell,
+} from "recharts";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut } from "lucide-react";
+import { supabase } from "./supabaseClient";
+
+const fmt = (n) =>
+  (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtCompact = (n) =>
+  (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+function legPnL(leg) {
+  if (leg.closePrice == null) return 0;
+  return leg.action === "sell" ? (leg.price - leg.closePrice) : (leg.closePrice - leg.price);
+}
+function optionPnL(t) {
+  if (t.status !== "closed") return 0;
+  const legs = t.legs || [];
+  const perContract = legs.reduce((s, l) => s + legPnL(l), 0);
+  return perContract * t.qty * 100;
+}
+function legLabel(l) {
+  return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}`;
+}
+function tradeLabel(t) {
+  if (t.type === "stock") return t.action === "buy" ? "Compra" : "Venta";
+  const legs = t.legs || [];
+  if (legs.length <= 1) return legs[0] ? legLabel(legs[0]) : "Opción";
+  return `Spread (${legs.length} patas)`;
+}
+
+export default function Dashboard({ session }) {
+  const [trades, setTrades] = useState([]);
+  const [prices, setPrices] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [closingTrade, setClosingTrade] = useState(null);
+  const [tab, setTab] = useState("open");
+
+  const userId = session.user.id;
+
+  useEffect(() => { loadAll(); }, []);
+
+  async function loadAll() {
+    setLoading(true);
+    setError("");
+    const [{ data: tradeRows, error: tErr }, { data: priceRows, error: pErr }] = await Promise.all([
+      supabase.from("trades").select("*").order("date", { ascending: true }),
+      supabase.from("current_prices").select("*"),
+    ]);
+    if (tErr) setError(tErr.message);
+    if (pErr) setError((e) => e || pErr.message);
+    setTrades((tradeRows || []).map(fromRow));
+    const pMap = {};
+    (priceRows || []).forEach((r) => { pMap[r.ticker] = Number(r.price); });
+    setPrices(pMap);
+    setLoading(false);
+  }
+
+  function fromRow(r) {
+    return {
+      id: r.id, type: r.type, ticker: r.ticker, date: r.date, qty: Number(r.qty),
+      price: r.price != null ? Number(r.price) : null, action: r.action,
+      legs: r.legs || null, status: r.status, closeDate: r.close_date,
+      notes: r.notes,
+    };
+  }
+
+  async function addTrade(data) {
+    setError("");
+    const row = {
+      user_id: userId, type: data.type, ticker: data.ticker, date: data.date, qty: data.qty,
+      price: data.price ?? null, action: data.action ?? null, legs: data.legs ?? null,
+      status: data.type === "option" ? "open" : null, notes: data.notes || null,
+    };
+    const { data: inserted, error: err } = await supabase.from("trades").insert(row).select().single();
+    if (err) { setError(err.message); return; }
+    setTrades((prev) => [...prev, fromRow(inserted)]);
+    setShowAdd(false);
+  }
+
+  async function deleteTrade(id) {
+    setTrades((prev) => prev.filter((t) => t.id !== id));
+    const { error: err } = await supabase.from("trades").delete().eq("id", id);
+    if (err) { setError(err.message); loadAll(); }
+  }
+
+  async function closeOptionTrade(id, closeDate, legCloses) {
+    const target = trades.find((t) => t.id === id);
+    const newLegs = target.legs.map((l, i) => ({ ...l, closePrice: Number(legCloses[i]) }));
+    const { error: err } = await supabase
+      .from("trades")
+      .update({ status: "closed", close_date: closeDate, legs: newLegs })
+      .eq("id", id);
+    if (err) { setError(err.message); return; }
+    setTrades((prev) => prev.map((t) => (t.id === id ? { ...t, status: "closed", closeDate, legs: newLegs } : t)));
+    setClosingTrade(null);
+  }
+
+  async function reopenTrade(id) {
+    const { error: err } = await supabase.from("trades").update({ status: "open", close_date: null }).eq("id", id);
+    if (err) { setError(err.message); return; }
+    setTrades((prev) => prev.map((t) => (t.id === id ? { ...t, status: "open", closeDate: null } : t)));
+  }
+
+  async function setPrice(ticker, value) {
+    setPrices((prev) => ({ ...prev, [ticker]: value }));
+    const { error: err } = await supabase
+      .from("current_prices")
+      .upsert({ user_id: userId, ticker, price: value }, { onConflict: "user_id,ticker" });
+    if (err) setError(err.message);
+  }
+
+  // ---------- derived ----------
+  const stockTrades = useMemo(() => trades.filter((t) => t.type === "stock"), [trades]);
+  const optionTrades = useMemo(() => trades.filter((t) => t.type === "option"), [trades]);
+
+  const { positions, sellPnlById } = useMemo(() => {
+    const byTicker = {};
+    const pnlById = {};
+    const sorted = [...stockTrades].sort((a, b) => new Date(a.date) - new Date(b.date));
+    for (const t of sorted) {
+      const tk = t.ticker;
+      if (!byTicker[tk]) byTicker[tk] = { ticker: tk, shares: 0, avgCost: 0, totalCost: 0, realized: 0 };
+      const p = byTicker[tk];
+      if (t.action === "buy") {
+        p.totalCost += t.qty * t.price;
+        p.shares += t.qty;
+        p.avgCost = p.shares > 0 ? p.totalCost / p.shares : 0;
+      } else {
+        const sellQty = Math.min(t.qty, p.shares);
+        const pnl = (t.price - p.avgCost) * sellQty;
+        pnlById[t.id] = pnl;
+        p.realized += pnl;
+        p.totalCost -= p.avgCost * sellQty;
+        p.shares -= sellQty;
+        if (p.shares <= 0.0001) { p.shares = 0; p.totalCost = 0; p.avgCost = 0; }
+      }
+    }
+    return { positions: Object.values(byTicker), sellPnlById: pnlById };
+  }, [stockTrades]);
+
+  const openPositions = positions.filter((p) => p.shares > 0);
+  const totalMarketValue = openPositions.reduce((s, p) => s + (prices[p.ticker] ?? p.avgCost) * p.shares, 0);
+  const stockRealized = positions.reduce((s, p) => s + p.realized, 0);
+  const stockUnrealized = openPositions.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
+
+  const closedOptions = optionTrades.filter((t) => t.status === "closed");
+  const openOptions = optionTrades.filter((t) => t.status !== "closed");
+  const optionRealized = closedOptions.reduce((s, t) => s + optionPnL(t), 0);
+
+  const realizedTotal = stockRealized + optionRealized;
+  const unrealizedTotal = stockUnrealized;
+  const totalPnL = realizedTotal + unrealizedTotal;
+
+  const closedSells = stockTrades.filter((t) => t.action === "sell");
+  const closedForWinRate = [...closedSells, ...closedOptions];
+  const wins = closedForWinRate.filter((t) => t.type === "option" ? optionPnL(t) > 0 : (sellPnlById[t.id] ?? 0) > 0).length;
+  const winRate = closedForWinRate.length ? (wins / closedForWinRate.length) * 100 : null;
+
+  const chartData = useMemo(() => {
+    const events = [];
+    for (const t of closedSells) events.push({ date: t.date, pnl: sellPnlById[t.id] ?? 0 });
+    for (const t of closedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t) });
+    events.sort((a, b) => new Date(a.date) - new Date(b.date));
+    let acc = 0;
+    return events.map((e, i) => { acc += e.pnl; return { i: i + 1, date: e.date, acumulado: Math.round(acc * 100) / 100 }; });
+  }, [closedSells, closedOptions, sellPnlById]);
+
+  const byTickerChart = useMemo(() => {
+    const map = {};
+    for (const t of closedSells) map[t.ticker] = (map[t.ticker] || 0) + (sellPnlById[t.id] ?? 0);
+    for (const t of closedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t);
+    return Object.entries(map).map(([ticker, pnl]) => ({ ticker, pnl: Math.round(pnl * 100) / 100 })).sort((a, b) => b.pnl - a.pnl);
+  }, [closedSells, closedOptions, sellPnlById]);
+
+  const tickerTape = [
+    ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
+    ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: null })),
+  ];
+
+  async function signOut() { await supabase.auth.signOut(); }
+
+  if (loading) {
+    return <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><span className="mono" style={{ color: "var(--muted)" }}>Cargando bitácora…</span></div>;
+  }
+
+  return (
+    <div className="app">
+      <div className="header">
+        <div>
+          <div className="eyebrow">BITÁCORA · {session.user.email}</div>
+          <div className="h1">Mi Bitácora de Trading</div>
+        </div>
+        <div className="top-actions">
+          <button className="btn btn-gold" onClick={() => setShowAdd(true)}><Plus size={16} /> Nuevo trade</button>
+          <button className="btn btn-ghost" onClick={signOut}><LogOut size={15} /></button>
+        </div>
+      </div>
+
+      {tickerTape.length > 0 && (
+        <div className="tape">
+          <div className="tape-track">
+            {[...tickerTape, ...tickerTape].map((item, i) => (
+              <span key={i} className="tape-item" style={{ color: item.val == null ? "var(--muted)" : item.val >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {item.label} {item.val != null ? (item.val >= 0 ? "▲ " : "▼ ") + fmt(Math.abs(item.val)) : "· abierta"}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="content">
+        {error && <div className="error-banner">{error}</div>}
+
+        <div className="cards">
+          <div className="card">
+            <div className="card-label">P&L Realizado</div>
+            <div className="card-value" style={{ color: realizedTotal >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(realizedTotal)}</div>
+            <div className="card-sub">trades cerrados</div>
+          </div>
+          <div className="card" style={{ opacity: openPositions.length === 0 ? 0.6 : 1 }}>
+            <div className="card-label">P&L No Realizado</div>
+            <div className="card-value" style={{ color: unrealizedTotal >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(unrealizedTotal)}</div>
+            <div className="card-sub">posiciones abiertas</div>
+          </div>
+          <div className="card">
+            <div className="card-label">P&L Total</div>
+            <div className="card-value big" style={{ color: totalPnL >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(totalPnL)}</div>
+            <div className="card-sub">realizado + no realizado</div>
+          </div>
+          <div className="card">
+            <div className="card-label">Win Rate</div>
+            <div className="card-value" style={{ color: winRate == null ? "var(--muted)" : winRate >= 60 ? "var(--gain)" : winRate >= 40 ? "var(--gold)" : "var(--loss)" }}>
+              {winRate == null ? "—" : `${winRate.toFixed(0)}%`}
+            </div>
+            <div className="card-sub">{wins}/{closedForWinRate.length} ganadores</div>
+          </div>
+        </div>
+
+        <div className="grid-2">
+          <div className="panel">
+            <div className="panel-head"><div className="panel-title">Curva de P&L acumulado</div></div>
+            {chartData.length === 0 ? <div className="empty">Sin trades cerrados aún</div> : (
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={chartData}>
+                  <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="i" tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
+                  <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
+                  <ReferenceLine y={0} stroke="#20304C" />
+                  <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "Acumulado"]} labelFormatter={(_, p) => p?.[0]?.payload?.date || ""} />
+                  <Line type="monotone" dataKey="acumulado" stroke="#E8A33D" strokeWidth={2} dot={{ r: 3, fill: "#E8A33D" }} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          <div className="panel">
+            <div className="panel-head"><div className="panel-title">P&L por ticker</div></div>
+            {byTickerChart.length === 0 ? <div className="empty">Sin trades cerrados aún</div> : (
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={byTickerChart}>
+                  <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="ticker" tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
+                  <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
+                  <ReferenceLine y={0} stroke="#20304C" />
+                  <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "P&L"]} />
+                  <Bar dataKey="pnl" radius={[3, 3, 0, 0]}>
+                    {byTickerChart.map((d, i) => <Cell key={i} fill={d.pnl >= 0 ? "#34D399" : "#F4665A"} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head"><div className="panel-title">Portafolio — acciones</div></div>
+          {openPositions.length === 0 ? <div className="empty">Sin acciones en portafolio</div> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Ticker</th><th>Acciones</th><th>$ Prom.</th><th>$ Actual</th><th>$ Mercado</th><th>P&L no realiz.</th><th>%</th></tr></thead>
+                <tbody>
+                  {openPositions.map((p) => {
+                    const cur = prices[p.ticker] ?? p.avgCost;
+                    const mv = cur * p.shares;
+                    const pnl = (cur - p.avgCost) * p.shares;
+                    const pct = p.avgCost ? (pnl / (p.avgCost * p.shares)) * 100 : 0;
+                    return (
+                      <tr key={p.ticker}>
+                        <td style={{ fontWeight: 500 }}>{p.ticker}</td>
+                        <td className="mono">{p.shares}</td>
+                        <td className="mono">{fmt(p.avgCost)}</td>
+                        <td>
+                          <input
+                            type="number" className="price-input"
+                            value={prices[p.ticker] ?? ""} placeholder={p.avgCost.toFixed(2)}
+                            onChange={(e) => setPrice(p.ticker, Number(e.target.value))}
+                          />
+                        </td>
+                        <td className="mono">{fmt(mv)}</td>
+                        <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(pnl)}</td>
+                        <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pct.toFixed(1)}%</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {totalMarketValue > 0 && <div className="mono" style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Valor total de mercado: <span style={{ color: "var(--text)" }}>{fmt(totalMarketValue)}</span></div>}
+            </div>
+          )}
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Historial de trades</div>
+            <div className="tabs">
+              {["open", "closed", "all"].map((k) => (
+                <button key={k} className={`tab ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>
+                  {k === "open" ? "Abiertos" : k === "closed" ? "Cerrados" : "Todos"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <TradeTable
+            trades={trades.filter((t) => {
+              const isOpen = t.type === "option" ? t.status !== "closed" : t.action === "buy";
+              if (tab === "open") return isOpen;
+              if (tab === "closed") return !isOpen;
+              return true;
+            })}
+            sellPnlById={sellPnlById}
+            onDelete={deleteTrade}
+            onClose={(t) => setClosingTrade(t)}
+            onReopen={reopenTrade}
+          />
+        </div>
+      </div>
+
+      {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} />}
+      {closingTrade && <CloseModal trade={closingTrade} onCancel={() => setClosingTrade(null)} onSave={(date, legCloses) => closeOptionTrade(closingTrade.id, date, legCloses)} />}
+    </div>
+  );
+}
+
+function TradeTable({ trades, sellPnlById, onDelete, onClose, onReopen }) {
+  if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
+  const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead><tr><th>Fecha</th><th>Ticker</th><th>Tipo</th><th>Cant.</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
+        <tbody>
+          {sorted.map((t) => {
+            const isOption = t.type === "option";
+            const isOpen = isOption ? t.status !== "closed" : t.action === "buy";
+            const pnl = isOption ? optionPnL(t) : (t.action === "sell" ? (sellPnlById[t.id] ?? 0) : null);
+            return (
+              <tr key={t.id}>
+                <td className="mono" style={{ fontSize: 12 }}>{t.date}</td>
+                <td style={{ fontWeight: 500 }}>{t.ticker}</td>
+                <td style={{ fontSize: 13 }}>{tradeLabel(t)}</td>
+                <td className="mono">{t.qty}</td>
+                <td><span className={`badge ${isOpen ? "badge-open" : "badge-closed"}`}>{isOpen ? "Abierto" : "Cerrado"}</span></td>
+                <td className="mono" style={{ color: pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pnl == null ? "—" : fmt(pnl)}</td>
+                <td>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {isOption && isOpen && <button className="icon-btn" style={{ color: "var(--gain)" }} title="Cerrar" onClick={() => onClose(t)}><CheckCircle2 size={15} /></button>}
+                    {isOption && !isOpen && <button className="icon-btn" style={{ color: "var(--muted)" }} title="Reabrir" onClick={() => onReopen(t.id)}><RotateCcw size={15} /></button>}
+                    <button className="icon-btn" style={{ color: "var(--loss)" }} title="Eliminar" onClick={() => onDelete(t.id)}><Trash2 size={15} /></button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AddTradeModal({ onCancel, onSave }) {
+  const [type, setType] = useState("stock");
+  const [ticker, setTicker] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [qty, setQty] = useState("");
+  const [notes, setNotes] = useState("");
+  // stock
+  const [action, setAction] = useState("buy");
+  const [price, setPrice] = useState("");
+  // option legs
+  const [legs, setLegs] = useState([{ action: "sell", optionType: "call", strike: "", price: "" }]);
+
+  function updateLeg(i, patch) {
+    setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  }
+  function addLeg() {
+    if (legs.length >= 4) return;
+    setLegs((prev) => [...prev, { action: "sell", optionType: "call", strike: "", price: "" }]);
+  }
+  function removeLeg(i) {
+    if (legs.length <= 1) return;
+    setLegs((prev) => prev.filter((_, idx) => idx !== i));
+  }
+
+  function submit() {
+    if (!ticker || !qty) return;
+    if (type === "stock") {
+      if (!price) return;
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes });
+    } else {
+      if (legs.some((l) => l.strike === "" || l.price === "")) return;
+      const cleanLegs = legs.map((l) => ({ action: l.action, optionType: l.optionType, strike: Number(l.strike), price: Number(l.price), closePrice: null }));
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes });
+    }
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-head"><div className="modal-title">Nuevo trade</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
+
+        <div className="type-toggle">
+          {["stock", "option"].map((k) => (
+            <button key={k} onClick={() => setType(k)} style={{ background: type === k ? "var(--gold)" : "transparent", color: type === k ? "#1A1300" : "var(--muted)", border: `1px solid ${type === k ? "var(--gold)" : "var(--border)"}` }}>
+              {k === "stock" ? "Acción" : "Opción / Spread"}
+            </button>
+          ))}
+        </div>
+
+        <div className="form-grid">
+          <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL" /></div>
+          <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+
+          {type === "stock" ? (
+            <>
+              <div className="field"><div className="field-label">Acción</div>
+                <select value={action} onChange={(e) => setAction(e.target.value)}><option value="buy">Compra</option><option value="sell">Venta</option></select>
+              </div>
+              <div className="field"><div className="field-label">Acciones</div><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Precio ($)</div><input type="number" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+            </>
+          ) : (
+            <div className="field"><div className="field-label">Contratos (todas las patas)</div><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
+          )}
+
+          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Notas (opcional)</div><input value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
+        </div>
+
+        {type === "option" && (
+          <div style={{ marginTop: 14 }}>
+            <div className="field-label" style={{ marginBottom: 8 }}>Patas ({legs.length}/4) — 1 pata = opción simple, 2+ = spread</div>
+            {legs.map((leg, i) => (
+              <div className="leg-row" key={i}>
+                <div className="field"><div className="field-label">Acción</div>
+                  <select value={leg.action} onChange={(e) => updateLeg(i, { action: e.target.value })}><option value="sell">Venta</option><option value="buy">Compra</option></select>
+                </div>
+                <div className="field"><div className="field-label">Tipo</div>
+                  <select value={leg.optionType} onChange={(e) => updateLeg(i, { optionType: e.target.value })}><option value="call">Call</option><option value="put">Put</option></select>
+                </div>
+                <div className="field"><div className="field-label">Strike</div><input type="number" value={leg.strike} onChange={(e) => updateLeg(i, { strike: e.target.value })} /></div>
+                <div className="field"><div className="field-label">Premium</div><input type="number" value={leg.price} onChange={(e) => updateLeg(i, { price: e.target.value })} /></div>
+                <button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => removeLeg(i)} disabled={legs.length <= 1}><Trash2 size={15} /></button>
+              </div>
+            ))}
+            {legs.length < 4 && <button className="btn btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }} onClick={addLeg}><Plus size={13} /> Agregar pata</button>}
+          </div>
+        )}
+
+        <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar trade</button>
+      </div>
+    </div>
+  );
+}
+
+function CloseModal({ trade, onCancel, onSave }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [legCloses, setLegCloses] = useState((trade.legs || []).map(() => ""));
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-head"><div className="modal-title">Cerrar posición — {trade.ticker}</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
+        <div className="field" style={{ marginBottom: 14 }}><div className="field-label">Fecha de cierre</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        {(trade.legs || []).map((leg, i) => (
+          <div className="field" key={i} style={{ marginBottom: 10 }}>
+            <div className="field-label">{legLabel(leg)} — precio de cierre</div>
+            <input type="number" value={legCloses[i]} onChange={(e) => setLegCloses((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} />
+          </div>
+        ))}
+        <button
+          className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
+          onClick={() => legCloses.every((v) => v !== "") && onSave(date, legCloses)}
+        >
+          Confirmar cierre
+        </button>
+      </div>
+    </div>
+  );
+}
