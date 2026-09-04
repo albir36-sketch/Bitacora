@@ -20,7 +20,7 @@ function optionPnL(t) {
   if (t.status !== "closed") return 0;
   const legs = t.legs || [];
   const perContract = legs.reduce((s, l) => s + legPnL(l), 0);
-  return perContract * t.qty * 100;
+  return perContract * t.qty * 100 - (t.commission || 0) - (t.closeCommission || 0);
 }
 function legLabel(l) {
   return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}`;
@@ -67,6 +67,8 @@ export default function Dashboard({ session }) {
       price: r.price != null ? Number(r.price) : null, action: r.action,
       legs: r.legs || null, status: r.status, closeDate: r.close_date,
       notes: r.notes,
+      commission: r.commission != null ? Number(r.commission) : 0,
+      closeCommission: r.close_commission != null ? Number(r.close_commission) : 0,
     };
   }
 
@@ -76,6 +78,7 @@ export default function Dashboard({ session }) {
       user_id: userId, type: data.type, ticker: data.ticker, date: data.date, qty: data.qty,
       price: data.price ?? null, action: data.action ?? null, legs: data.legs ?? null,
       status: data.type === "option" ? "open" : null, notes: data.notes || null,
+      commission: data.commission ?? 0,
     };
     const { data: inserted, error: err } = await supabase.from("trades").insert(row).select().single();
     if (err) { setError(err.message); return; }
@@ -89,15 +92,16 @@ export default function Dashboard({ session }) {
     if (err) { setError(err.message); loadAll(); }
   }
 
-  async function closeOptionTrade(id, closeDate, legCloses) {
+  async function closeOptionTrade(id, closeDate, legCloses, closeCommission) {
     const target = trades.find((t) => t.id === id);
     const newLegs = target.legs.map((l, i) => ({ ...l, closePrice: Number(legCloses[i]) }));
+    const cc = Number(closeCommission) || 0;
     const { error: err } = await supabase
       .from("trades")
-      .update({ status: "closed", close_date: closeDate, legs: newLegs })
+      .update({ status: "closed", close_date: closeDate, legs: newLegs, close_commission: cc })
       .eq("id", id);
     if (err) { setError(err.message); return; }
-    setTrades((prev) => prev.map((t) => (t.id === id ? { ...t, status: "closed", closeDate, legs: newLegs } : t)));
+    setTrades((prev) => prev.map((t) => (t.id === id ? { ...t, status: "closed", closeDate, legs: newLegs, closeCommission: cc } : t)));
     setClosingTrade(null);
   }
 
@@ -128,12 +132,12 @@ export default function Dashboard({ session }) {
       if (!byTicker[tk]) byTicker[tk] = { ticker: tk, shares: 0, avgCost: 0, totalCost: 0, realized: 0 };
       const p = byTicker[tk];
       if (t.action === "buy") {
-        p.totalCost += t.qty * t.price;
+        p.totalCost += t.qty * t.price + (t.commission || 0);
         p.shares += t.qty;
         p.avgCost = p.shares > 0 ? p.totalCost / p.shares : 0;
       } else {
         const sellQty = Math.min(t.qty, p.shares);
-        const pnl = (t.price - p.avgCost) * sellQty;
+        const pnl = (t.price - p.avgCost) * sellQty - (t.commission || 0);
         pnlById[t.id] = pnl;
         p.realized += pnl;
         p.totalCost -= p.avgCost * sellQty;
@@ -342,7 +346,7 @@ export default function Dashboard({ session }) {
       </div>
 
       {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} />}
-      {closingTrade && <CloseModal trade={closingTrade} onCancel={() => setClosingTrade(null)} onSave={(date, legCloses) => closeOptionTrade(closingTrade.id, date, legCloses)} />}
+      {closingTrade && <CloseModal trade={closingTrade} onCancel={() => setClosingTrade(null)} onSave={(date, legCloses, closeCommission) => closeOptionTrade(closingTrade.id, date, legCloses, closeCommission)} />}
     </div>
   );
 }
@@ -353,18 +357,20 @@ function TradeTable({ trades, sellPnlById, onDelete, onClose, onReopen }) {
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th>Fecha</th><th>Ticker</th><th>Tipo</th><th>Cant.</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Ticker</th><th>Tipo</th><th>Cant.</th><th>Comisión</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
         <tbody>
           {sorted.map((t) => {
             const isOption = t.type === "option";
             const isOpen = isOption ? t.status !== "closed" : t.action === "buy";
             const pnl = isOption ? optionPnL(t) : (t.action === "sell" ? (sellPnlById[t.id] ?? 0) : null);
+            const totalCommission = (t.commission || 0) + (t.closeCommission || 0);
             return (
               <tr key={t.id}>
                 <td className="mono" style={{ fontSize: 12 }}>{t.date}</td>
                 <td style={{ fontWeight: 500 }}>{t.ticker}</td>
                 <td style={{ fontSize: 13 }}>{tradeLabel(t)}</td>
                 <td className="mono">{t.qty}</td>
+                <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmt(totalCommission) : "—"}</td>
                 <td><span className={`badge ${isOpen ? "badge-open" : "badge-closed"}`}>{isOpen ? "Abierto" : "Cerrado"}</span></td>
                 <td className="mono" style={{ color: pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pnl == null ? "—" : fmt(pnl)}</td>
                 <td>
@@ -389,6 +395,7 @@ function AddTradeModal({ onCancel, onSave }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [qty, setQty] = useState("");
   const [notes, setNotes] = useState("");
+  const [commission, setCommission] = useState("");
   // stock
   const [action, setAction] = useState("buy");
   const [price, setPrice] = useState("");
@@ -409,13 +416,14 @@ function AddTradeModal({ onCancel, onSave }) {
 
   function submit() {
     if (!ticker || !qty) return;
+    const commissionNum = Number(commission) || 0;
     if (type === "stock") {
       if (!price) return;
-      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes });
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes, commission: commissionNum });
     } else {
       if (legs.some((l) => l.strike === "" || l.price === "")) return;
       const cleanLegs = legs.map((l) => ({ action: l.action, optionType: l.optionType, strike: Number(l.strike), price: Number(l.price), closePrice: null }));
-      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes });
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum });
     }
   }
 
@@ -448,6 +456,7 @@ function AddTradeModal({ onCancel, onSave }) {
             <div className="field"><div className="field-label">Contratos (todas las patas)</div><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
           )}
 
+          <div className="field"><div className="field-label">Comisión ($, opcional)</div><input type="number" value={commission} onChange={(e) => setCommission(e.target.value)} placeholder="0.00" /></div>
           <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Notas (opcional)</div><input value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
         </div>
 
@@ -480,6 +489,7 @@ function AddTradeModal({ onCancel, onSave }) {
 function CloseModal({ trade, onCancel, onSave }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [legCloses, setLegCloses] = useState((trade.legs || []).map(() => ""));
+  const [closeCommission, setCloseCommission] = useState("");
 
   return (
     <div className="modal-overlay">
@@ -492,9 +502,13 @@ function CloseModal({ trade, onCancel, onSave }) {
             <input type="number" value={legCloses[i]} onChange={(e) => setLegCloses((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} />
           </div>
         ))}
+        <div className="field" style={{ marginBottom: 10 }}>
+          <div className="field-label">Comisión de cierre ($, opcional)</div>
+          <input type="number" value={closeCommission} onChange={(e) => setCloseCommission(e.target.value)} placeholder="0.00" />
+        </div>
         <button
           className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
-          onClick={() => legCloses.every((v) => v !== "") && onSave(date, legCloses)}
+          onClick={() => legCloses.every((v) => v !== "") && onSave(date, legCloses, closeCommission)}
         >
           Confirmar cierre
         </button>
