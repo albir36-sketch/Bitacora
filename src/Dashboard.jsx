@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell,
@@ -11,6 +11,16 @@ const fmt = (n) =>
 const fmtCompact = (n) =>
   (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
+
+async function fetchQuote(ticker) {
+  const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${FINNHUB_KEY}`);
+  if (!res.ok) throw new Error(`Error al consultar ${ticker}`);
+  const data = await res.json();
+  if (data.c == null || data.c === 0) throw new Error(`Sin datos para ${ticker}`);
+  return data.c;
+}
 
 function legPnL(leg) {
   if (leg.closePrice == null) return 0;
@@ -43,6 +53,8 @@ export default function Dashboard({ session }) {
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
   const [period, setPeriod] = useState("mtd");
+  const [refreshing, setRefreshing] = useState(false);
+  const autoRefreshedRef = useRef(false);
 
   const userId = session.user.id;
 
@@ -123,6 +135,24 @@ export default function Dashboard({ session }) {
       .from("current_prices")
       .upsert({ user_id: userId, ticker, price: value }, { onConflict: "user_id,ticker" });
     if (err) setError(err.message);
+  }
+
+  async function refreshPrices(tickers) {
+    if (!FINNHUB_KEY) {
+      setError("Para actualizar precios automáticamente falta configurar VITE_FINNHUB_API_KEY en Vercel.");
+      return;
+    }
+    if (!tickers || tickers.length === 0) return;
+    setRefreshing(true);
+    for (const tk of tickers) {
+      try {
+        const price = await fetchQuote(tk);
+        await setPrice(tk, price);
+      } catch (e) {
+        // si un ticker falla (símbolo raro, límite alcanzado, etc.) seguimos con el resto
+      }
+    }
+    setRefreshing(false);
   }
 
   async function addCashTx(data) {
@@ -270,6 +300,13 @@ export default function Dashboard({ session }) {
   }, [capitalPoints, realizedPoints]);
 
   async function signOut() { await supabase.auth.signOut(); }
+
+  useEffect(() => {
+    if (!loading && !autoRefreshedRef.current && openPositions.length > 0) {
+      autoRefreshedRef.current = true;
+      refreshPrices(openPositions.map((p) => p.ticker));
+    }
+  }, [loading, openPositions]);
 
   if (loading) {
     return <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><span className="mono" style={{ color: "var(--muted)" }}>Cargando bitácora…</span></div>;
@@ -448,7 +485,14 @@ export default function Dashboard({ session }) {
         </div>
 
         <div className="panel">
-          <div className="panel-head"><div className="panel-title">Portafolio — acciones</div></div>
+          <div className="panel-head">
+            <div className="panel-title">Portafolio — acciones</div>
+            {openPositions.length > 0 && (
+              <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 13 }} disabled={refreshing} onClick={() => refreshPrices(openPositions.map((p) => p.ticker))}>
+                {refreshing ? "Actualizando…" : "Actualizar precios"}
+              </button>
+            )}
+          </div>
           {openPositions.length === 0 ? <div className="empty">Sin acciones en portafolio</div> : (
             <div className="table-wrap">
               <table>
