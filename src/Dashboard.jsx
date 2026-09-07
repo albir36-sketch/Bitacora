@@ -35,11 +35,14 @@ function tradeLabel(t) {
 export default function Dashboard({ session }) {
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
+  const [cashTx, setCashTx] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [showAddCash, setShowAddCash] = useState(false);
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
+  const [period, setPeriod] = useState("mtd");
 
   const userId = session.user.id;
 
@@ -48,16 +51,19 @@ export default function Dashboard({ session }) {
   async function loadAll() {
     setLoading(true);
     setError("");
-    const [{ data: tradeRows, error: tErr }, { data: priceRows, error: pErr }] = await Promise.all([
+    const [{ data: tradeRows, error: tErr }, { data: priceRows, error: pErr }, { data: cashRows, error: cErr }] = await Promise.all([
       supabase.from("trades").select("*").order("date", { ascending: true }),
       supabase.from("current_prices").select("*"),
+      supabase.from("cash_transactions").select("*").order("date", { ascending: true }),
     ]);
     if (tErr) setError(tErr.message);
     if (pErr) setError((e) => e || pErr.message);
+    if (cErr) setError((e) => e || cErr.message);
     setTrades((tradeRows || []).map(fromRow));
     const pMap = {};
     (priceRows || []).forEach((r) => { pMap[r.ticker] = Number(r.price); });
     setPrices(pMap);
+    setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes })));
     setLoading(false);
   }
 
@@ -117,6 +123,21 @@ export default function Dashboard({ session }) {
       .from("current_prices")
       .upsert({ user_id: userId, ticker, price: value }, { onConflict: "user_id,ticker" });
     if (err) setError(err.message);
+  }
+
+  async function addCashTx(data) {
+    setError("");
+    const row = { user_id: userId, date: data.date, type: data.type, amount: data.amount, notes: data.notes || null };
+    const { data: inserted, error: err } = await supabase.from("cash_transactions").insert(row).select().single();
+    if (err) { setError(err.message); return; }
+    setCashTx((prev) => [...prev, { id: inserted.id, date: inserted.date, type: inserted.type, amount: Number(inserted.amount), notes: inserted.notes }]);
+    setShowAddCash(false);
+  }
+
+  async function deleteCashTx(id) {
+    setCashTx((prev) => prev.filter((c) => c.id !== id));
+    const { error: err } = await supabase.from("cash_transactions").delete().eq("id", id);
+    if (err) { setError(err.message); loadAll(); }
   }
 
   // ---------- derived ----------
@@ -187,6 +208,67 @@ export default function Dashboard({ session }) {
     ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: null })),
   ];
 
+  // ---------- cuenta de efectivo ----------
+  const netDeposits = cashTx.reduce((s, c) => s + (c.type === "deposit" ? c.amount : -c.amount), 0);
+  const accountValue = netDeposits + totalPnL;
+  const totalReturnPct = netDeposits > 0 ? (totalPnL / netDeposits) * 100 : null;
+
+  // serie de depósitos netos acumulados en el tiempo, para saber el capital aportado "a fecha de"
+  const capitalPoints = useMemo(() => {
+    const sorted = [...cashTx].sort((a, b) => new Date(a.date) - new Date(b.date));
+    let acc = 0;
+    return sorted.map((c) => { acc += c.type === "deposit" ? c.amount : -c.amount; return { date: c.date, value: acc }; });
+  }, [cashTx]);
+
+  // serie de P&L realizado acumulado en el tiempo (reutiliza los mismos eventos que chartData)
+  const realizedPoints = chartData; // [{date, acumulado}]
+
+  function valueAsOf(points, dateStr, key) {
+    // último punto con fecha <= dateStr; si no hay ninguno, 0
+    let val = 0;
+    for (const p of points) {
+      if (new Date(p.date) <= new Date(dateStr)) val = p[key];
+      else break;
+    }
+    return val;
+  }
+
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  function isoDaysAgo(n) { const d = new Date(today); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); }
+  function isoMonthsAgo(n) { const d = new Date(today); d.setMonth(d.getMonth() - n); return d.toISOString().slice(0, 10); }
+  function firstOfMonth() { return new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10); }
+  function firstOfYear() { return new Date(today.getFullYear(), 0, 1).toISOString().slice(0, 10); }
+  const earliestDate = [...cashTx.map((c) => c.date), ...trades.map((t) => t.date)].sort()[0] || todayStr;
+
+  const PERIODS = [
+    { id: "1w", label: "1S", start: isoDaysAgo(7) },
+    { id: "mtd", label: "MAF", start: firstOfMonth() },
+    { id: "1m", label: "1M", start: isoMonthsAgo(1) },
+    { id: "3m", label: "3M", start: isoMonthsAgo(3) },
+    { id: "ytd", label: "AAF", start: firstOfYear() },
+    { id: "1y", label: "1A", start: isoMonthsAgo(12) },
+    { id: "all", label: "TODO", start: earliestDate },
+  ];
+  const activePeriod = PERIODS.find((p) => p.id === period) || PERIODS[1];
+
+  const realizedNow = valueAsOf(realizedPoints, todayStr, "acumulado");
+  const realizedAtStart = valueAsOf(realizedPoints, activePeriod.start, "acumulado");
+  const periodResult = realizedNow - realizedAtStart;
+  const capitalAtStart = valueAsOf(capitalPoints, activePeriod.start, "value");
+  const periodReturnPct = capitalAtStart > 0 ? (periodResult / capitalAtStart) * 100 : null;
+
+  const depositsInPeriod = cashTx.filter((c) => c.date >= activePeriod.start && c.date <= todayStr);
+
+  // serie combinada de valor de cuenta (capital aportado + P&L realizado) para la gráfica
+  const accountValueChart = useMemo(() => {
+    const dates = Array.from(new Set([...capitalPoints.map((p) => p.date), ...realizedPoints.map((p) => p.date)])).sort();
+    return dates.map((d, i) => ({
+      i: i + 1, date: d,
+      valor: Math.round((valueAsOf(capitalPoints, d, "value") + valueAsOf(realizedPoints, d, "acumulado")) * 100) / 100,
+    }));
+  }, [capitalPoints, realizedPoints]);
+
   async function signOut() { await supabase.auth.signOut(); }
 
   if (loading) {
@@ -243,6 +325,89 @@ export default function Dashboard({ session }) {
               {winRate == null ? "—" : `${winRate.toFixed(0)}%`}
             </div>
             <div className="card-sub">{wins}/{closedForWinRate.length} ganadores</div>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Cuenta de efectivo</div>
+            <button className="btn btn-gold" style={{ padding: "6px 12px", fontSize: 13 }} onClick={() => setShowAddCash(true)}><Plus size={14} /> Movimiento</button>
+          </div>
+
+          <div className="cards" style={{ marginBottom: 16 }}>
+            <div className="card">
+              <div className="card-label">Aportado Neto</div>
+              <div className="card-value">{fmt(netDeposits)}</div>
+              <div className="card-sub">depósitos − retiros</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Valor de Cuenta</div>
+              <div className="card-value big" style={{ color: accountValue >= netDeposits ? "var(--gain)" : "var(--loss)" }}>{fmt(accountValue)}</div>
+              <div className="card-sub">aportado + P&L total</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Rendimiento Total</div>
+              <div className="card-value" style={{ color: totalReturnPct == null ? "var(--muted)" : totalReturnPct >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {totalReturnPct == null ? "—" : `${totalReturnPct >= 0 ? "+" : ""}${totalReturnPct.toFixed(1)}%`}
+              </div>
+              <div className="card-sub">sobre lo aportado</div>
+            </div>
+          </div>
+
+          <div className="tabs" style={{ flexWrap: "wrap", marginBottom: 12 }}>
+            {PERIODS.map((p) => (
+              <button key={p.id} className={`tab ${period === p.id ? "active" : ""}`} onClick={() => setPeriod(p.id)}>{p.label}</button>
+            ))}
+          </div>
+
+          <div className="cards" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 16 }}>
+            <div className="card">
+              <div className="card-label">Resultado del periodo</div>
+              <div className="card-value" style={{ color: periodResult >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(periodResult)}</div>
+              <div className="card-sub">P&L realizado en el rango</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Rendimiento del periodo</div>
+              <div className="card-value" style={{ color: periodReturnPct == null ? "var(--muted)" : periodReturnPct >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {periodReturnPct == null ? "—" : `${periodReturnPct >= 0 ? "+" : ""}${periodReturnPct.toFixed(1)}%`}
+              </div>
+              <div className="card-sub">sobre capital al inicio del periodo</div>
+            </div>
+          </div>
+
+          {accountValueChart.length > 0 && (
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={accountValueChart}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="i" tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
+                <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
+                <ReferenceLine y={0} stroke="#20304C" />
+                <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "Valor de cuenta"]} labelFormatter={(_, p) => p?.[0]?.payload?.date || ""} />
+                <Line type="monotone" dataKey="valor" stroke="#34D399" strokeWidth={2} dot={{ r: 3, fill: "#34D399" }} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+
+          <div style={{ marginTop: 16 }}>
+            <div className="field-label" style={{ marginBottom: 8 }}>Movimientos de efectivo</div>
+            {cashTx.length === 0 ? <div className="empty">Sin movimientos aún</div> : (
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Fecha</th><th>Tipo</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
+                  <tbody>
+                    {[...cashTx].sort((a, b) => new Date(b.date) - new Date(a.date)).map((c) => (
+                      <tr key={c.id}>
+                        <td className="mono" style={{ fontSize: 12 }}>{c.date}</td>
+                        <td><span className={`badge ${c.type === "deposit" ? "badge-closed" : "badge-open"}`}>{c.type === "deposit" ? "Depósito" : "Retiro"}</span></td>
+                        <td className="mono" style={{ color: c.type === "deposit" ? "var(--gain)" : "var(--loss)" }}>{c.type === "deposit" ? "+" : "-"}{fmt(c.amount)}</td>
+                        <td style={{ fontSize: 13, color: "var(--muted)" }}>{c.notes || "—"}</td>
+                        <td><button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => deleteCashTx(c.id)}><Trash2 size={15} /></button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
 
@@ -346,6 +511,7 @@ export default function Dashboard({ session }) {
       </div>
 
       {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} />}
+      {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} />}
       {closingTrade && <CloseModal trade={closingTrade} onCancel={() => setClosingTrade(null)} onSave={(date, legCloses, closeCommission) => closeOptionTrade(closingTrade.id, date, legCloses, closeCommission)} />}
     </div>
   );
@@ -481,6 +647,42 @@ function AddTradeModal({ onCancel, onSave }) {
         )}
 
         <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar trade</button>
+      </div>
+    </div>
+  );
+}
+
+function AddCashModal({ onCancel, onSave }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [type, setType] = useState("deposit");
+  const [amount, setAmount] = useState("");
+  const [notes, setNotes] = useState("");
+
+  function submit() {
+    if (!amount || Number(amount) <= 0) return;
+    onSave({ date, type, amount: Number(amount), notes });
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-head"><div className="modal-title">Movimiento de efectivo</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
+
+        <div className="type-toggle">
+          {["deposit", "withdrawal"].map((k) => (
+            <button key={k} onClick={() => setType(k)} style={{ background: type === k ? "var(--gold)" : "transparent", color: type === k ? "#1A1300" : "var(--muted)", border: `1px solid ${type === k ? "var(--gold)" : "var(--border)"}` }}>
+              {k === "deposit" ? "Depósito" : "Retiro"}
+            </button>
+          ))}
+        </div>
+
+        <div className="form-grid">
+          <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          <div className="field"><div className="field-label">Monto ($)</div><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /></div>
+          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Notas (opcional)</div><input value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
+        </div>
+
+        <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar movimiento</button>
       </div>
     </div>
   );
