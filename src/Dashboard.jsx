@@ -13,6 +13,8 @@ const fmtCompact = (n) =>
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
+const TRADIER_TOKEN = import.meta.env.VITE_TRADIER_TOKEN;
+const TRADIER_BASE = "https://sandbox.tradier.com/v1";
 
 async function fetchQuote(ticker) {
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${FINNHUB_KEY}`);
@@ -22,15 +24,76 @@ async function fetchQuote(ticker) {
   return data.c;
 }
 
+// Construye el símbolo de opción estilo OCC que espera Tradier, p.ej. AAPL260117C00150000
+function buildOccSymbol(ticker, expirationISO, optionType, strike) {
+  if (!ticker || !expirationISO || !strike) return null;
+  const d = new Date(expirationISO + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return null;
+  const yy = String(d.getFullYear()).slice(-2);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const cp = optionType === "put" ? "P" : "C";
+  const strikeStr = String(Math.round(strike * 1000)).padStart(8, "0");
+  return `${ticker.toUpperCase()}${yy}${mm}${dd}${cp}${strikeStr}`;
+}
+
+// Pide cotizaciones a Tradier para una lista de símbolos OCC, devuelve { symbol: price }
+async function fetchOptionQuotes(occSymbols) {
+  const unique = [...new Set(occSymbols.filter(Boolean))];
+  if (unique.length === 0 || !TRADIER_TOKEN) return {};
+  const res = await fetch(`${TRADIER_BASE}/markets/quotes?symbols=${encodeURIComponent(unique.join(","))}&greeks=false`, {
+    headers: { Authorization: `Bearer ${TRADIER_TOKEN}`, Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error("Error al consultar precios de opciones en Tradier");
+  const data = await res.json();
+  let quotes = data?.quotes?.quote;
+  if (!quotes) return {};
+  if (!Array.isArray(quotes)) quotes = [quotes];
+  const map = {};
+  for (const q of quotes) {
+    const last = q.last ?? (q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null);
+    if (last != null) map[q.symbol] = last;
+  }
+  return map;
+}
+
 function legPnL(leg) {
   if (leg.closePrice == null) return 0;
   return leg.action === "sell" ? (leg.price - leg.closePrice) : (leg.closePrice - leg.price);
 }
 function optionPnL(t) {
+  if (t.status === "assigned") return 0; // el resultado ya quedó reflejado en el trade de acciones vinculado
   if (t.status !== "closed") return 0;
   const legs = t.legs || [];
   const perContract = legs.reduce((s, l) => s + legPnL(l), 0);
   return perContract * t.qty * 100 - (t.commission || 0) - (t.closeCommission || 0);
+}
+// Calcula el precio efectivo (y la acción) del trade de acciones que se genera al asignar/ejercer
+// una opción de una sola pata, incorporando la prima cobrada/pagada y la comisión de apertura.
+function assignmentStockTrade(t) {
+  const leg = (t.legs || [])[0];
+  if (!leg) return null;
+  const shares = t.qty * 100;
+  const commissionPerShare = shares > 0 ? (t.commission || 0) / shares : 0;
+  let price, action;
+  if (leg.action === "sell" && leg.optionType === "put") {
+    // CSP asignada: te compran (te obligan a comprar) acciones al strike; la prima cobrada rebaja tu costo
+    action = "buy";
+    price = leg.strike - leg.price + commissionPerShare;
+  } else if (leg.action === "sell" && leg.optionType === "call") {
+    // CC asignada: te retiran (vendes) las acciones al strike; la prima cobrada se suma a lo recibido
+    action = "sell";
+    price = leg.strike + leg.price - commissionPerShare;
+  } else if (leg.action === "buy" && leg.optionType === "call") {
+    // Call comprada, ejercida: compras acciones al strike; la prima pagada se suma a tu costo
+    action = "buy";
+    price = leg.strike + leg.price + commissionPerShare;
+  } else {
+    // Put comprada, ejercida: vendes acciones al strike; la prima pagada rebaja lo recibido
+    action = "sell";
+    price = leg.strike - leg.price - commissionPerShare;
+  }
+  return { action, price: Math.max(0, price), shares };
 }
 function legLabel(l) {
   return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}`;
@@ -40,6 +103,22 @@ function tradeLabel(t) {
   const legs = t.legs || [];
   if (legs.length <= 1) return legs[0] ? legLabel(legs[0]) : "Opción";
   return `Spread (${legs.length} patas)`;
+}
+// P&L no realizado de una opción abierta, usando precios de mercado (occSymbol -> precio) si están disponibles
+function unrealizedOptionPnL(t, markPrices) {
+  if (t.status === "closed" || t.status === "assigned") return null;
+  const legs = t.legs || [];
+  let perContract = 0;
+  let anyMark = false;
+  for (const l of legs) {
+    const occ = buildOccSymbol(t.ticker, t.expiration, l.optionType, l.strike);
+    const mark = occ && markPrices ? markPrices[occ] : null;
+    if (mark == null) continue;
+    anyMark = true;
+    perContract += l.action === "sell" ? (l.price - mark) : (mark - l.price);
+  }
+  if (!anyMark) return null;
+  return perContract * t.qty * 100 - (t.commission || 0);
 }
 
 export default function Dashboard({ session }) {
@@ -54,7 +133,9 @@ export default function Dashboard({ session }) {
   const [tab, setTab] = useState("open");
   const [period, setPeriod] = useState("mtd");
   const [refreshing, setRefreshing] = useState(false);
+  const [markPrices, setMarkPrices] = useState({});
   const autoRefreshedRef = useRef(false);
+  const autoRefreshedOptionsRef = useRef(false);
 
   const userId = session.user.id;
 
@@ -84,7 +165,7 @@ export default function Dashboard({ session }) {
       id: r.id, type: r.type, ticker: r.ticker, date: r.date, qty: Number(r.qty),
       price: r.price != null ? Number(r.price) : null, action: r.action,
       legs: r.legs || null, status: r.status, closeDate: r.close_date,
-      notes: r.notes,
+      notes: r.notes, expiration: r.expiration || null,
       commission: r.commission != null ? Number(r.commission) : 0,
       closeCommission: r.close_commission != null ? Number(r.close_commission) : 0,
     };
@@ -96,7 +177,7 @@ export default function Dashboard({ session }) {
       user_id: userId, type: data.type, ticker: data.ticker, date: data.date, qty: data.qty,
       price: data.price ?? null, action: data.action ?? null, legs: data.legs ?? null,
       status: data.type === "option" ? "open" : null, notes: data.notes || null,
-      commission: data.commission ?? 0,
+      commission: data.commission ?? 0, expiration: data.expiration || null,
     };
     const { data: inserted, error: err } = await supabase.from("trades").insert(row).select().single();
     if (err) { setError(err.message); return; }
@@ -120,6 +201,34 @@ export default function Dashboard({ session }) {
       .eq("id", id);
     if (err) { setError(err.message); return; }
     setTrades((prev) => prev.map((t) => (t.id === id ? { ...t, status: "closed", closeDate, legs: newLegs, closeCommission: cc } : t)));
+    setClosingTrade(null);
+  }
+
+  async function assignOptionTrade(id, assignDate) {
+    setError("");
+    const target = trades.find((t) => t.id === id);
+    const calc = assignmentStockTrade(target);
+    if (!calc) { setError("No se pudo calcular la asignación de esta opción."); return; }
+
+    const stockRow = {
+      user_id: userId, type: "stock", ticker: target.ticker, date: assignDate, qty: calc.shares,
+      price: Math.round(calc.price * 100) / 100, action: calc.action, legs: null, status: null,
+      commission: 0, expiration: null,
+      notes: `Asignación/ejercicio de opción ${legLabel(target.legs[0])} venc. ${target.expiration || ""}`,
+    };
+    const { data: insertedStock, error: err1 } = await supabase.from("trades").insert(stockRow).select().single();
+    if (err1) { setError(err1.message); return; }
+
+    const { error: err2 } = await supabase
+      .from("trades")
+      .update({ status: "assigned", close_date: assignDate })
+      .eq("id", id);
+    if (err2) { setError(err2.message); return; }
+
+    setTrades((prev) => [
+      ...prev.map((t) => (t.id === id ? { ...t, status: "assigned", closeDate: assignDate } : t)),
+      fromRow(insertedStock),
+    ]);
     setClosingTrade(null);
   }
 
@@ -151,6 +260,29 @@ export default function Dashboard({ session }) {
       } catch (e) {
         // si un ticker falla (símbolo raro, límite alcanzado, etc.) seguimos con el resto
       }
+    }
+    setRefreshing(false);
+  }
+
+  async function refreshOptionPrices(optionTradesList) {
+    if (!TRADIER_TOKEN) {
+      setError("Para actualizar precios de opciones falta configurar VITE_TRADIER_TOKEN en Vercel.");
+      return;
+    }
+    const symbols = [];
+    for (const t of optionTradesList) {
+      for (const l of t.legs || []) {
+        const occ = buildOccSymbol(t.ticker, t.expiration, l.optionType, l.strike);
+        if (occ) symbols.push(occ);
+      }
+    }
+    if (symbols.length === 0) return;
+    setRefreshing(true);
+    try {
+      const map = await fetchOptionQuotes(symbols);
+      setMarkPrices((prev) => ({ ...prev, ...map }));
+    } catch (e) {
+      setError(e.message || "No se pudieron actualizar los precios de opciones.");
     }
     setRefreshing(false);
   }
@@ -205,11 +337,13 @@ export default function Dashboard({ session }) {
   const stockUnrealized = openPositions.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
 
   const closedOptions = optionTrades.filter((t) => t.status === "closed");
-  const openOptions = optionTrades.filter((t) => t.status !== "closed");
+  const assignedOptions = optionTrades.filter((t) => t.status === "assigned");
+  const openOptions = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned");
   const optionRealized = closedOptions.reduce((s, t) => s + optionPnL(t), 0);
+  const optionUnrealized = openOptions.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
 
   const realizedTotal = stockRealized + optionRealized;
-  const unrealizedTotal = stockUnrealized;
+  const unrealizedTotal = stockUnrealized + optionUnrealized;
   const totalPnL = realizedTotal + unrealizedTotal;
 
   const closedSells = stockTrades.filter((t) => t.action === "sell");
@@ -235,7 +369,7 @@ export default function Dashboard({ session }) {
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
-    ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: null })),
+    ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: unrealizedOptionPnL(t, markPrices) })),
   ];
 
   // ---------- cuenta de efectivo ----------
@@ -307,6 +441,13 @@ export default function Dashboard({ session }) {
       refreshPrices(openPositions.map((p) => p.ticker));
     }
   }, [loading, openPositions]);
+
+  useEffect(() => {
+    if (!loading && !autoRefreshedOptionsRef.current && openOptions.length > 0) {
+      autoRefreshedOptionsRef.current = true;
+      refreshOptionPrices(openOptions);
+    }
+  }, [loading, openOptions]);
 
   if (loading) {
     return <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><span className="mono" style={{ color: "var(--muted)" }}>Cargando bitácora…</span></div>;
@@ -531,22 +672,30 @@ export default function Dashboard({ session }) {
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Historial de trades</div>
-            <div className="tabs">
-              {["open", "closed", "all"].map((k) => (
-                <button key={k} className={`tab ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>
-                  {k === "open" ? "Abiertos" : k === "closed" ? "Cerrados" : "Todos"}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {openOptions.length > 0 && (
+                <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 13 }} disabled={refreshing} onClick={() => refreshOptionPrices(openOptions)}>
+                  {refreshing ? "Actualizando…" : "Actualizar opciones"}
                 </button>
-              ))}
+              )}
+              <div className="tabs">
+                {["open", "closed", "all"].map((k) => (
+                  <button key={k} className={`tab ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>
+                    {k === "open" ? "Abiertos" : k === "closed" ? "Cerrados" : "Todos"}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
           <TradeTable
             trades={trades.filter((t) => {
-              const isOpen = t.type === "option" ? t.status !== "closed" : t.action === "buy";
+              const isOpen = t.type === "option" ? (t.status !== "closed" && t.status !== "assigned") : t.action === "buy";
               if (tab === "open") return isOpen;
               if (tab === "closed") return !isOpen;
               return true;
             })}
             sellPnlById={sellPnlById}
+            markPrices={markPrices}
             onDelete={deleteTrade}
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
@@ -556,14 +705,22 @@ export default function Dashboard({ session }) {
 
       {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} />}
       {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} />}
-      {closingTrade && <CloseModal trade={closingTrade} onCancel={() => setClosingTrade(null)} onSave={(date, legCloses, closeCommission) => closeOptionTrade(closingTrade.id, date, legCloses, closeCommission)} />}
+      {closingTrade && (
+        <CloseModal
+          trade={closingTrade}
+          onCancel={() => setClosingTrade(null)}
+          onSave={(date, legCloses, closeCommission) => closeOptionTrade(closingTrade.id, date, legCloses, closeCommission)}
+          onAssign={(date) => assignOptionTrade(closingTrade.id, date)}
+        />
+      )}
     </div>
   );
 }
 
-function TradeTable({ trades, sellPnlById, onDelete, onClose, onReopen }) {
+function TradeTable({ trades, sellPnlById, markPrices, onDelete, onClose, onReopen }) {
   if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
   const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const todayStr = new Date().toISOString().slice(0, 10);
   return (
     <div className="table-wrap">
       <table>
@@ -571,22 +728,37 @@ function TradeTable({ trades, sellPnlById, onDelete, onClose, onReopen }) {
         <tbody>
           {sorted.map((t) => {
             const isOption = t.type === "option";
-            const isOpen = isOption ? t.status !== "closed" : t.action === "buy";
-            const pnl = isOption ? optionPnL(t) : (t.action === "sell" ? (sellPnlById[t.id] ?? 0) : null);
+            const isAssigned = isOption && t.status === "assigned";
+            const isOpen = isOption ? (t.status !== "closed" && t.status !== "assigned") : t.action === "buy";
+            const expired = isOption && isOpen && t.expiration && t.expiration < todayStr;
+            const pnl = isOption
+              ? (t.status === "closed" ? optionPnL(t) : t.status === "assigned" ? 0 : unrealizedOptionPnL(t, markPrices))
+              : (t.action === "sell" ? (sellPnlById[t.id] ?? 0) : null);
             const totalCommission = (t.commission || 0) + (t.closeCommission || 0);
             return (
               <tr key={t.id}>
                 <td className="mono" style={{ fontSize: 12 }}>{t.date}</td>
                 <td style={{ fontWeight: 500 }}>{t.ticker}</td>
-                <td style={{ fontSize: 13 }}>{tradeLabel(t)}</td>
+                <td style={{ fontSize: 13 }}>
+                  {tradeLabel(t)}
+                  {isOption && t.expiration && <div style={{ fontSize: 11, color: "var(--muted)" }}>Vence {t.expiration}</div>}
+                  {t.notes && t.notes.startsWith("Asignación") && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
+                </td>
                 <td className="mono">{t.qty}</td>
                 <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmt(totalCommission) : "—"}</td>
-                <td><span className={`badge ${isOpen ? "badge-open" : "badge-closed"}`}>{isOpen ? "Abierto" : "Cerrado"}</span></td>
+                <td>
+                  <span
+                    className={`badge ${expired ? "badge-open" : isAssigned ? "badge-closed" : isOpen ? "badge-open" : "badge-closed"}`}
+                    style={expired ? { background: "#3A1A1A", color: "var(--loss)" } : isAssigned ? { background: "#1A2A3A", color: "#7EC8E3" } : undefined}
+                  >
+                    {expired ? "Vencida" : isAssigned ? "Asignada" : isOpen ? "Abierto" : "Cerrado"}
+                  </span>
+                </td>
                 <td className="mono" style={{ color: pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pnl == null ? "—" : fmt(pnl)}</td>
                 <td>
                   <div style={{ display: "flex", gap: 6 }}>
-                    {isOption && isOpen && <button className="icon-btn" style={{ color: "var(--gain)" }} title="Cerrar" onClick={() => onClose(t)}><CheckCircle2 size={15} /></button>}
-                    {isOption && !isOpen && <button className="icon-btn" style={{ color: "var(--muted)" }} title="Reabrir" onClick={() => onReopen(t.id)}><RotateCcw size={15} /></button>}
+                    {isOption && isOpen && <button className="icon-btn" style={{ color: "var(--gain)" }} title="Cerrar / Asignar" onClick={() => onClose(t)}><CheckCircle2 size={15} /></button>}
+                    {isOption && t.status === "closed" && <button className="icon-btn" style={{ color: "var(--muted)" }} title="Reabrir" onClick={() => onReopen(t.id)}><RotateCcw size={15} /></button>}
                     <button className="icon-btn" style={{ color: "var(--loss)" }} title="Eliminar" onClick={() => onDelete(t.id)}><Trash2 size={15} /></button>
                   </div>
                 </td>
@@ -609,7 +781,8 @@ function AddTradeModal({ onCancel, onSave }) {
   // stock
   const [action, setAction] = useState("buy");
   const [price, setPrice] = useState("");
-  // option legs
+  // option
+  const [expiration, setExpiration] = useState("");
   const [legs, setLegs] = useState([{ action: "sell", optionType: "call", strike: "", price: "" }]);
 
   function updateLeg(i, patch) {
@@ -631,9 +804,10 @@ function AddTradeModal({ onCancel, onSave }) {
       if (!price) return;
       onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes, commission: commissionNum });
     } else {
+      if (!expiration) return;
       if (legs.some((l) => l.strike === "" || l.price === "")) return;
       const cleanLegs = legs.map((l) => ({ action: l.action, optionType: l.optionType, strike: Number(l.strike), price: Number(l.price), closePrice: null }));
-      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum });
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum, expiration });
     }
   }
 
@@ -663,7 +837,10 @@ function AddTradeModal({ onCancel, onSave }) {
               <div className="field"><div className="field-label">Precio ($)</div><input type="number" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
             </>
           ) : (
-            <div className="field"><div className="field-label">Contratos (todas las patas)</div><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
+            <>
+              <div className="field"><div className="field-label">Contratos (todas las patas)</div><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Vencimiento</div><input type="date" value={expiration} onChange={(e) => setExpiration(e.target.value)} /></div>
+            </>
           )}
 
           <div className="field"><div className="field-label">Comisión ($, opcional)</div><input type="number" value={commission} onChange={(e) => setCommission(e.target.value)} placeholder="0.00" /></div>
@@ -732,32 +909,72 @@ function AddCashModal({ onCancel, onSave }) {
   );
 }
 
-function CloseModal({ trade, onCancel, onSave }) {
+function CloseModal({ trade, onCancel, onSave, onAssign }) {
+  const canAssign = (trade.legs || []).length === 1;
+  const [mode, setMode] = useState("close"); // "close" | "assign"
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [legCloses, setLegCloses] = useState((trade.legs || []).map(() => ""));
   const [closeCommission, setCloseCommission] = useState("");
+
+  const preview = mode === "assign" ? assignmentStockTrade(trade) : null;
 
   return (
     <div className="modal-overlay">
       <div className="modal">
         <div className="modal-head"><div className="modal-title">Cerrar posición — {trade.ticker}</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
-        <div className="field" style={{ marginBottom: 14 }}><div className="field-label">Fecha de cierre</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-        {(trade.legs || []).map((leg, i) => (
-          <div className="field" key={i} style={{ marginBottom: 10 }}>
-            <div className="field-label">{legLabel(leg)} — precio de cierre</div>
-            <input type="number" value={legCloses[i]} onChange={(e) => setLegCloses((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} />
+
+        {canAssign && (
+          <div className="type-toggle">
+            <button onClick={() => setMode("close")} style={{ background: mode === "close" ? "var(--gold)" : "transparent", color: mode === "close" ? "#1A1300" : "var(--muted)", border: `1px solid ${mode === "close" ? "var(--gold)" : "var(--border)"}` }}>
+              Cerrar pagando/cobrando prima
+            </button>
+            <button onClick={() => setMode("assign")} style={{ background: mode === "assign" ? "var(--gold)" : "transparent", color: mode === "assign" ? "#1A1300" : "var(--muted)", border: `1px solid ${mode === "assign" ? "var(--gold)" : "var(--border)"}` }}>
+              Asignación / Ejercicio
+            </button>
           </div>
-        ))}
-        <div className="field" style={{ marginBottom: 10 }}>
-          <div className="field-label">Comisión de cierre ($, opcional)</div>
-          <input type="number" value={closeCommission} onChange={(e) => setCloseCommission(e.target.value)} placeholder="0.00" />
+        )}
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <div className="field-label">{mode === "assign" ? "Fecha de asignación" : "Fecha de cierre"}</div>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </div>
-        <button
-          className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
-          onClick={() => legCloses.every((v) => v !== "") && onSave(date, legCloses, closeCommission)}
-        >
-          Confirmar cierre
-        </button>
+
+        {mode === "close" && (
+          <>
+            {(trade.legs || []).map((leg, i) => (
+              <div className="field" key={i} style={{ marginBottom: 10 }}>
+                <div className="field-label">{legLabel(leg)} — precio de cierre</div>
+                <input type="number" value={legCloses[i]} onChange={(e) => setLegCloses((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} />
+              </div>
+            ))}
+            <div className="field" style={{ marginBottom: 10 }}>
+              <div className="field-label">Comisión de cierre ($, opcional)</div>
+              <input type="number" value={closeCommission} onChange={(e) => setCloseCommission(e.target.value)} placeholder="0.00" />
+            </div>
+            <button
+              className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
+              onClick={() => legCloses.every((v) => v !== "") && onSave(date, legCloses, closeCommission)}
+            >
+              Confirmar cierre
+            </button>
+          </>
+        )}
+
+        {mode === "assign" && preview && (
+          <>
+            <div style={{ background: "var(--panel2)", border: "1px solid var(--border)", borderRadius: 6, padding: 12, fontSize: 13, marginBottom: 14, color: "var(--muted)" }}>
+              Esto registrará automáticamente una <strong style={{ color: "var(--text)" }}>{preview.action === "buy" ? "compra" : "venta"}</strong> de{" "}
+              <strong style={{ color: "var(--text)" }}>{preview.shares} acciones</strong> de {trade.ticker} a un precio efectivo de{" "}
+              <strong style={{ color: "var(--text)" }}>{fmt(preview.price)}</strong> por acción (ya incluye la prima y comisión de esta opción).
+            </div>
+            <button
+              className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
+              onClick={() => onAssign(date)}
+            >
+              Confirmar asignación / ejercicio
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
