@@ -182,10 +182,11 @@ function unrealizedOptionPnL(t, markPrices) {
 // Calcula el valor de cuenta (aportado + P&L total) de una divisa concreta, a partir de TODOS
 // los trades/movimientos (sin filtrar por la vista activa). Se usa para sumar el patrimonio
 // total convertido a una única divisa.
-function computeCurrencySummary(allTrades, allCashTx, prices, markPrices, curCode) {
+function computeCurrencySummary(allTrades, allCashTx, allDividends, prices, markPrices, curCode) {
   const tradesById = Object.fromEntries(allTrades.map((t) => [t.id, t]));
   const curTrades = allTrades.filter((t) => (t.currency || "USD") === curCode);
   const curCash = allCashTx.filter((c) => (c.currency || "USD") === curCode);
+  const curDividends = (allDividends || []).filter((d) => (d.currency || "USD") === curCode);
   const stockTrades = curTrades.filter((t) => t.type === "stock");
   const optionTrades = curTrades.filter((t) => t.type === "option");
 
@@ -217,8 +218,9 @@ function computeCurrencySummary(allTrades, allCashTx, prices, markPrices, curCod
   const openOpts = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled");
   const optionRealized = closedOpts.reduce((s, t) => s + optionPnL(t, tradesById), 0);
   const optionUnrealized = openOpts.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
+  const dividendsTotal = curDividends.reduce((s, d) => s + d.amount, 0);
 
-  const totalPnL = stockRealized + stockUnrealized + optionRealized + optionUnrealized;
+  const totalPnL = stockRealized + stockUnrealized + optionRealized + optionUnrealized + dividendsTotal;
   const netDeposits = curCash.reduce((s, c) => s + (c.type === "deposit" ? c.amount : -c.amount), 0);
   return { currency: curCode, accountValue: netDeposits + totalPnL };
 }
@@ -227,6 +229,8 @@ export default function Dashboard({ session }) {
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
   const [cashTx, setCashTx] = useState([]);
+  const [dividends, setDividends] = useState([]);
+  const [showAddDividend, setShowAddDividend] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
@@ -274,19 +278,22 @@ export default function Dashboard({ session }) {
   async function loadAll() {
     setLoading(true);
     setError("");
-    const [{ data: tradeRows, error: tErr }, { data: priceRows, error: pErr }, { data: cashRows, error: cErr }] = await Promise.all([
+    const [{ data: tradeRows, error: tErr }, { data: priceRows, error: pErr }, { data: cashRows, error: cErr }, { data: divRows, error: dErr }] = await Promise.all([
       supabase.from("trades").select("*").order("date", { ascending: true }),
       supabase.from("current_prices").select("*"),
       supabase.from("cash_transactions").select("*").order("date", { ascending: true }),
+      supabase.from("dividends").select("*").order("date", { ascending: true }),
     ]);
     if (tErr) setError(tErr.message);
     if (pErr) setError((e) => e || pErr.message);
     if (cErr) setError((e) => e || cErr.message);
+    if (dErr) setError((e) => e || dErr.message);
     setTrades((tradeRows || []).map(fromRow));
     const pMap = {};
     (priceRows || []).forEach((r) => { pMap[r.ticker] = Number(r.price); });
     setPrices(pMap);
     setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
+    setDividends((divRows || []).map((r) => ({ id: r.id, ticker: r.ticker, date: r.date, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
     setLoading(false);
   }
 
@@ -467,12 +474,31 @@ export default function Dashboard({ session }) {
     if (err) { setError(err.message); loadAll(); }
   }
 
+  async function addDividend(data) {
+    setError("");
+    const row = {
+      user_id: userId, ticker: data.ticker.toUpperCase().trim(), date: data.date,
+      amount: data.amount, currency: data.currency || "USD", notes: data.notes || null,
+    };
+    const { data: inserted, error: err } = await supabase.from("dividends").insert(row).select().single();
+    if (err) { setError(err.message); return; }
+    setDividends((prev) => [...prev, { id: inserted.id, ticker: inserted.ticker, date: inserted.date, amount: Number(inserted.amount), notes: inserted.notes, currency: inserted.currency || "USD" }]);
+    setShowAddDividend(false);
+  }
+
+  async function deleteDividend(id) {
+    setDividends((prev) => prev.filter((d) => d.id !== id));
+    const { error: err } = await supabase.from("dividends").delete().eq("id", id);
+    if (err) { setError(err.message); loadAll(); }
+  }
+
   // ---------- derived ----------
   // tradesById usa TODOS los trades (sin filtrar) para poder resolver cadenas de roll aunque
   // el eslabón anterior perteneciera a otra vista; el resto de cálculos sí se filtra por divisa.
   const tradesById = useMemo(() => Object.fromEntries(trades.map((t) => [t.id, t])), [trades]);
   const currencyTrades = useMemo(() => trades.filter((t) => (t.currency || "USD") === currency), [trades, currency]);
   const currencyCashTx = useMemo(() => cashTx.filter((c) => (c.currency || "USD") === currency), [cashTx, currency]);
+  const currencyDividends = useMemo(() => dividends.filter((d) => (d.currency || "USD") === currency), [dividends, currency]);
 
   const stockTrades = useMemo(() => currencyTrades.filter((t) => t.type === "stock"), [currencyTrades]);
   const optionTrades = useMemo(() => currencyTrades.filter((t) => t.type === "option"), [currencyTrades]);
@@ -483,7 +509,7 @@ export default function Dashboard({ session }) {
     let total = 0;
     const breakdown = [];
     for (const c of CURRENCIES) {
-      const summary = computeCurrencySummary(trades, cashTx, prices, markPrices, c.code);
+      const summary = computeCurrencySummary(trades, cashTx, dividends, prices, markPrices, c.code);
       const rate = c.code === currency ? 1 : fxRates[c.code];
       if (rate == null) continue;
       const converted = summary.accountValue / rate;
@@ -491,7 +517,7 @@ export default function Dashboard({ session }) {
       if (summary.accountValue !== 0) breakdown.push({ code: c.code, value: summary.accountValue });
     }
     return { total, breakdown };
-  }, [trades, cashTx, prices, markPrices, fxRates, currency]);
+  }, [trades, cashTx, dividends, prices, markPrices, fxRates, currency]);
 
   const { positions, sellPnlById } = useMemo(() => {
     const byTicker = {};
@@ -529,7 +555,8 @@ export default function Dashboard({ session }) {
   const optionRealized = closedOptions.reduce((s, t) => s + optionPnL(t, tradesById), 0);
   const optionUnrealized = openOptions.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
 
-  const realizedTotal = stockRealized + optionRealized;
+  const dividendsTotal = currencyDividends.reduce((s, d) => s + d.amount, 0);
+  const realizedTotal = stockRealized + optionRealized + dividendsTotal;
   const unrealizedTotal = stockUnrealized + optionUnrealized;
   const totalPnL = realizedTotal + unrealizedTotal;
 
@@ -542,17 +569,19 @@ export default function Dashboard({ session }) {
     const events = [];
     for (const t of closedSells) events.push({ date: t.date, pnl: sellPnlById[t.id] ?? 0 });
     for (const t of closedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) });
+    for (const d of currencyDividends) events.push({ date: d.date, pnl: d.amount });
     events.sort((a, b) => new Date(a.date) - new Date(b.date));
     let acc = 0;
     return events.map((e, i) => { acc += e.pnl; return { i: i + 1, date: e.date, acumulado: Math.round(acc * 100) / 100 }; });
-  }, [closedSells, closedOptions, sellPnlById, tradesById]);
+  }, [closedSells, closedOptions, sellPnlById, tradesById, currencyDividends]);
 
   const byTickerChart = useMemo(() => {
     const map = {};
     for (const t of closedSells) map[t.ticker] = (map[t.ticker] || 0) + (sellPnlById[t.id] ?? 0);
     for (const t of closedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const d of currencyDividends) map[d.ticker] = (map[d.ticker] || 0) + d.amount;
     return Object.entries(map).map(([ticker, pnl]) => ({ ticker, pnl: Math.round(pnl * 100) / 100 })).sort((a, b) => b.pnl - a.pnl);
-  }, [closedSells, closedOptions, sellPnlById, tradesById]);
+  }, [closedSells, closedOptions, sellPnlById, tradesById, currencyDividends]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
@@ -721,7 +750,7 @@ export default function Dashboard({ session }) {
           <div className="card">
             <div className="card-label">P&L Realizado</div>
             <div className="card-value" style={{ color: realizedTotal >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(realizedTotal)}</div>
-            <div className="card-sub">trades cerrados</div>
+            <div className="card-sub">trades cerrados + dividendos</div>
           </div>
           <div className="card" style={{ opacity: openPositions.length === 0 ? 0.6 : 1 }}>
             <div className="card-label">P&L No Realizado</div>
@@ -830,6 +859,7 @@ export default function Dashboard({ session }) {
         )}
 
         {view === "dashboard" && (
+        <>
         <div className="grid-2">
           <div className="panel">
             <div className="panel-head"><div className="panel-title">Curva de P&L acumulado</div></div>
@@ -865,6 +895,37 @@ export default function Dashboard({ session }) {
             )}
           </div>
         </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Dividendos</div>
+            <button className="btn btn-gold" style={{ padding: "6px 12px", fontSize: 13 }} onClick={() => setShowAddDividend(true)}><Plus size={14} /> Registrar dividendo</button>
+          </div>
+          <div className="card" style={{ marginBottom: 16, maxWidth: 220 }}>
+            <div className="card-label">Total dividendos</div>
+            <div className="card-value" style={{ color: dividendsTotal > 0 ? "var(--gain)" : "var(--muted)" }}>{fmt(dividendsTotal)}</div>
+            <div className="card-sub">{currencyDividends.length} registrados</div>
+          </div>
+          {currencyDividends.length === 0 ? <div className="empty">Sin dividendos registrados aún</div> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Fecha</th><th>Ticker</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
+                <tbody>
+                  {[...currencyDividends].sort((a, b) => new Date(b.date) - new Date(a.date)).map((d) => (
+                    <tr key={d.id}>
+                      <td className="mono" style={{ fontSize: 12 }}>{d.date}</td>
+                      <td style={{ fontWeight: 500 }}>{d.ticker}</td>
+                      <td className="mono" style={{ color: "var(--gain)" }}>{fmt(d.amount)}</td>
+                      <td style={{ fontSize: 13, color: "var(--muted)" }}>{d.notes || "—"}</td>
+                      <td><button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => deleteDividend(d.id)}><Trash2 size={15} /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        </>
         )}
 
         {view === "portfolio" && (
@@ -953,6 +1014,7 @@ export default function Dashboard({ session }) {
 
       {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} defaultCurrency={currency} />}
       {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} defaultCurrency={currency} />}
+      {showAddDividend && <AddDividendModal onCancel={() => setShowAddDividend(false)} onSave={addDividend} defaultCurrency={currency} />}
       {closingTrade && (
         <CloseModal
           trade={closingTrade}
@@ -1173,6 +1235,41 @@ function AddCashModal({ onCancel, onSave, defaultCurrency }) {
         </div>
 
         <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar movimiento</button>
+      </div>
+    </div>
+  );
+}
+
+function AddDividendModal({ onCancel, onSave, defaultCurrency }) {
+  const [ticker, setTicker] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [amount, setAmount] = useState("");
+  const [notes, setNotes] = useState("");
+  const [currency, setCurrency] = useState(defaultCurrency || "USD");
+
+  function submit() {
+    if (!ticker || !amount || Number(amount) <= 0) return;
+    onSave({ ticker, date, amount: Number(amount), notes, currency });
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-head"><div className="modal-title">Registrar dividendo</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
+
+        <div className="form-grid">
+          <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL" /></div>
+          <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          <div className="field"><div className="field-label">Divisa</div>
+            <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>)}
+            </select>
+          </div>
+          <div className="field"><div className="field-label">Monto recibido</div><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /></div>
+          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Notas (opcional)</div><input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ej. dividendo trimestral" /></div>
+        </div>
+
+        <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar dividendo</button>
       </div>
     </div>
   );
