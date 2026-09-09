@@ -429,9 +429,9 @@ export default function Dashboard({ session }) {
     setRefreshing(false);
   }
 
-  async function refreshOptionPrices(optionTradesList) {
+  async function refreshOptionPrices(optionTradesList, silent = false) {
     if (!TRADIER_TOKEN) {
-      setError("Para actualizar precios de opciones falta configurar VITE_TRADIER_TOKEN en Vercel.");
+      if (!silent) setError("Para actualizar precios de opciones falta configurar VITE_TRADIER_TOKEN en Vercel.");
       return;
     }
     const symbols = [];
@@ -447,7 +447,7 @@ export default function Dashboard({ session }) {
       const map = await fetchOptionQuotes(symbols);
       setMarkPrices((prev) => ({ ...prev, ...map }));
     } catch (e) {
-      setError(e.message || "No se pudieron actualizar los precios de opciones.");
+      if (!silent) setError(e.message || "No se pudieron actualizar los precios de opciones.");
     }
     setRefreshing(false);
   }
@@ -632,7 +632,7 @@ export default function Dashboard({ session }) {
   useEffect(() => {
     if (!loading && !autoRefreshedOptionsRef.current && openOptions.length > 0) {
       autoRefreshedOptionsRef.current = true;
-      refreshOptionPrices(openOptions);
+      refreshOptionPrices(openOptions, true);
     }
   }, [loading, openOptions]);
 
