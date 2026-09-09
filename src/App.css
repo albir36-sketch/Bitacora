@@ -93,3 +93,40 @@ tbody td { padding: 8px 10px 8px 0; border-top: 1px solid var(--border); }
 
 .error-banner { font-size: 12px; padding: 8px 12px; border-radius: 6px; background: #3A1A1A; color: var(--loss); }
 .top-actions { display: flex; gap: 8px; align-items: center; }
+
+/* ---------- sidebar layout ---------- */
+.app-body { display: flex; align-items: flex-start; }
+.sidebar {
+  width: 220px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border);
+  min-height: calc(100vh - 108px); padding: 16px 10px; position: sticky; top: 0; align-self: flex-start;
+}
+.sidebar-label {
+  font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 1.5px; color: var(--muted);
+  padding: 14px 10px 6px; text-transform: uppercase;
+}
+.sidebar-label:first-child { padding-top: 4px; }
+.sidebar-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px;
+  color: var(--muted); font-size: 14px; cursor: pointer; margin-bottom: 2px; background: none;
+  border: none; width: 100%; text-align: left; font-family: inherit;
+}
+.sidebar-item:hover { background: var(--panel2); color: var(--text); }
+.sidebar-item.active { background: rgba(232,163,61,0.12); color: var(--gold); font-weight: 600; }
+.hamburger-btn {
+  display: none; background: none; border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px; color: var(--text); cursor: pointer; margin-right: 4px;
+}
+.sidebar-overlay { display: none; }
+
+@media (max-width: 860px) {
+  .sidebar {
+    position: fixed; top: 0; left: 0; height: 100vh; z-index: 60; width: 240px;
+    transform: translateX(-100%); transition: transform 0.2s ease; box-shadow: 4px 0 24px rgba(0,0,0,0.5);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .hamburger-btn { display: inline-flex; }
+  .sidebar-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 55;
+  }
+  .sidebar-overlay.open { display: block; }
+}
