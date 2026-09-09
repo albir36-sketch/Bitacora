@@ -179,6 +179,50 @@ function unrealizedOptionPnL(t, markPrices) {
   return perContract * t.qty * 100 - (t.commission || 0);
 }
 
+// Calcula el valor de cuenta (aportado + P&L total) de una divisa concreta, a partir de TODOS
+// los trades/movimientos (sin filtrar por la vista activa). Se usa para sumar el patrimonio
+// total convertido a una única divisa.
+function computeCurrencySummary(allTrades, allCashTx, prices, markPrices, curCode) {
+  const tradesById = Object.fromEntries(allTrades.map((t) => [t.id, t]));
+  const curTrades = allTrades.filter((t) => (t.currency || "USD") === curCode);
+  const curCash = allCashTx.filter((c) => (c.currency || "USD") === curCode);
+  const stockTrades = curTrades.filter((t) => t.type === "stock");
+  const optionTrades = curTrades.filter((t) => t.type === "option");
+
+  const byTicker = {};
+  const sorted = [...stockTrades].sort((a, b) => new Date(a.date) - new Date(b.date));
+  for (const t of sorted) {
+    const tk = t.ticker;
+    if (!byTicker[tk]) byTicker[tk] = { shares: 0, avgCost: 0, totalCost: 0, realized: 0 };
+    const p = byTicker[tk];
+    if (t.action === "buy") {
+      p.totalCost += t.qty * t.price + (t.commission || 0);
+      p.shares += t.qty;
+      p.avgCost = p.shares > 0 ? p.totalCost / p.shares : 0;
+    } else {
+      const sellQty = Math.min(t.qty, p.shares);
+      const pnl = (t.price - p.avgCost) * sellQty - (t.commission || 0);
+      p.realized += pnl;
+      p.totalCost -= p.avgCost * sellQty;
+      p.shares -= sellQty;
+      if (p.shares <= 0.0001) { p.shares = 0; p.totalCost = 0; p.avgCost = 0; }
+    }
+  }
+  const posArr = Object.entries(byTicker).map(([ticker, p]) => ({ ticker, ...p }));
+  const openPos = posArr.filter((p) => p.shares > 0);
+  const stockRealized = posArr.reduce((s, p) => s + p.realized, 0);
+  const stockUnrealized = openPos.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
+
+  const closedOpts = optionTrades.filter((t) => t.status === "closed");
+  const openOpts = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled");
+  const optionRealized = closedOpts.reduce((s, t) => s + optionPnL(t, tradesById), 0);
+  const optionUnrealized = openOpts.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
+
+  const totalPnL = stockRealized + stockUnrealized + optionRealized + optionUnrealized;
+  const netDeposits = curCash.reduce((s, c) => s + (c.type === "deposit" ? c.amount : -c.amount), 0);
+  return { currency: curCode, accountValue: netDeposits + totalPnL };
+}
+
 export default function Dashboard({ session }) {
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
@@ -195,6 +239,9 @@ export default function Dashboard({ session }) {
   const [view, setView] = useState("dashboard"); // "dashboard" | "portfolio" | "cash" | "trades"
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currency, setCurrency] = useState("USD");
+  const [fxRates, setFxRates] = useState(null); // { USD: 1, EUR: 0.92, GBP: 0.78 } relativas a `currency`
+  const [fxLoading, setFxLoading] = useState(false);
+  const [fxError, setFxError] = useState("");
   const autoRefreshedRef = useRef(false);
   const autoRefreshedOptionsRef = useRef(false);
   ACTIVE_SYMBOL = currencySymbol(currency);
@@ -202,6 +249,27 @@ export default function Dashboard({ session }) {
   const userId = session.user.id;
 
   useEffect(() => { loadAll(); }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadRates() {
+      setFxLoading(true);
+      setFxError("");
+      try {
+        const others = CURRENCIES.map((c) => c.code).filter((c) => c !== currency);
+        const res = await fetch(`https://api.frankfurter.app/latest?base=${currency}&symbols=${others.join(",")}`);
+        if (!res.ok) throw new Error("No se pudieron obtener las tasas de cambio.");
+        const data = await res.json();
+        if (!cancelled) setFxRates({ [currency]: 1, ...data.rates });
+      } catch (e) {
+        if (!cancelled) setFxError("No se pudo actualizar el tipo de cambio (revisa tu conexión).");
+      } finally {
+        if (!cancelled) setFxLoading(false);
+      }
+    }
+    loadRates();
+    return () => { cancelled = true; };
+  }, [currency]);
 
   async function loadAll() {
     setLoading(true);
@@ -409,6 +477,22 @@ export default function Dashboard({ session }) {
   const stockTrades = useMemo(() => currencyTrades.filter((t) => t.type === "stock"), [currencyTrades]);
   const optionTrades = useMemo(() => currencyTrades.filter((t) => t.type === "option"), [currencyTrades]);
 
+  // ---------- patrimonio total (todas las divisas convertidas a la activa) ----------
+  const combinedTotal = useMemo(() => {
+    if (!fxRates) return null;
+    let total = 0;
+    const breakdown = [];
+    for (const c of CURRENCIES) {
+      const summary = computeCurrencySummary(trades, cashTx, prices, markPrices, c.code);
+      const rate = c.code === currency ? 1 : fxRates[c.code];
+      if (rate == null) continue;
+      const converted = summary.accountValue / rate;
+      total += converted;
+      if (summary.accountValue !== 0) breakdown.push({ code: c.code, value: summary.accountValue });
+    }
+    return { total, breakdown };
+  }, [trades, cashTx, prices, markPrices, fxRates, currency]);
+
   const { positions, sellPnlById } = useMemo(() => {
     const byTicker = {};
     const pnlById = {};
@@ -615,6 +699,24 @@ export default function Dashboard({ session }) {
 
         {view === "dashboard" && (
         <>
+        {combinedTotal && combinedTotal.breakdown.length > 0 && (
+          <div className="panel" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <div className="card-label">Patrimonio total (convertido a {currency})</div>
+              <div className="card-value big" style={{ color: "var(--gold)" }}>{fmt(combinedTotal.total)}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                {combinedTotal.breakdown.map((b, i) => (
+                  <span key={b.code}>
+                    {i > 0 && " + "}
+                    {currencySymbol(b.code)}{b.value.toLocaleString("en-US", { maximumFractionDigits: 0 })} {b.code}
+                  </span>
+                ))}
+                {fxLoading && " · actualizando tasas…"}
+              </div>
+            </div>
+            {fxError && <div className="error-banner" style={{ margin: 0 }}>{fxError}</div>}
+          </div>
+        )}
         <div className="cards">
           <div className="card">
             <div className="card-label">P&L Realizado</div>
