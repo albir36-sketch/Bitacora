@@ -110,9 +110,16 @@ function chainAccumulated(trade, tradesById) {
 }
 
 function optionPnL(t, tradesById) {
-  if (t.status === "assigned" || t.status === "rolled") return 0; // resultado diferido a otro trade
-  if (t.status !== "closed") return 0;
+  if (t.status === "rolled") return 0; // resultado diferido al siguiente eslabón de la cadena
   const legs = t.legs || [];
+  if (t.status === "assigned") {
+    // la prima queda íntegramente realizada como ganancia: no hay costo de recompra, el precio del
+    // strike se cobra/paga aparte, en el trade de acciones que se genera con el precio real pagado.
+    if (legs.length !== 1) return 0; // los spreads no soportan asignación en esta versión
+    const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
+    return netPremium * t.qty * 100 - totalCommission;
+  }
+  if (t.status !== "closed") return 0;
   if (legs.length === 1) {
     const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
     const leg = legs[0];
@@ -124,34 +131,19 @@ function optionPnL(t, tradesById) {
   const perContract = legs.reduce((s, l) => s + legPnL(l), 0);
   return perContract * t.qty * 100 - (t.commission || 0) - (t.closeCommission || 0);
 }
-// Calcula el precio efectivo (y la acción) del trade de acciones que se genera al asignar/ejercer
-// una opción de una sola pata, incorporando TODA la cadena de primas cobradas/pagadas en los rolls
-// previos, más las comisiones acumuladas.
-function assignmentStockTrade(t, tradesById) {
+// Calcula el precio REAL (el strike, sin ajustar) y la acción del trade de acciones que se genera
+// al asignar/ejercer una opción de una sola pata. La prima cobrada/pagada en toda la cadena de rolls
+// se contabiliza aparte, como P&L propio de la opción (ver optionPnL), no oculta dentro del precio.
+function assignmentStockTrade(t) {
   const leg = (t.legs || [])[0];
   if (!leg) return null;
   const shares = t.qty * 100;
-  const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
-  const commissionPerShare = shares > 0 ? totalCommission / shares : 0;
-  let price, action;
-  if (leg.action === "sell" && leg.optionType === "put") {
-    // CSP asignada: te obligan a comprar acciones al strike; la prima neta cobrada rebaja tu costo
-    action = "buy";
-    price = leg.strike - netPremium + commissionPerShare;
-  } else if (leg.action === "sell" && leg.optionType === "call") {
-    // CC asignada: te retiran las acciones al strike; la prima neta cobrada se suma a lo recibido
-    action = "sell";
-    price = leg.strike + netPremium - commissionPerShare;
-  } else if (leg.action === "buy" && leg.optionType === "call") {
-    // Call comprada, ejercida: compras acciones al strike; la prima neta pagada se suma a tu costo
-    action = "buy";
-    price = leg.strike - netPremium + commissionPerShare;
-  } else {
-    // Put comprada, ejercida: vendes acciones al strike; la prima neta pagada rebaja lo recibido
-    action = "sell";
-    price = leg.strike + netPremium - commissionPerShare;
-  }
-  return { action, price: Math.max(0, price), shares };
+  let action;
+  if (leg.action === "sell" && leg.optionType === "put") action = "buy";        // CSP asignada
+  else if (leg.action === "sell" && leg.optionType === "call") action = "sell"; // CC asignada
+  else if (leg.action === "buy" && leg.optionType === "call") action = "buy";   // call comprada, ejercida
+  else action = "sell";                                                        // put comprada, ejercida
+  return { action, price: leg.strike, shares };
 }
 function legLabel(l) {
   return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}`;
@@ -214,7 +206,7 @@ function computeCurrencySummary(allTrades, allCashTx, allDividends, prices, mark
   const stockRealized = posArr.reduce((s, p) => s + p.realized, 0);
   const stockUnrealized = openPos.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
 
-  const closedOpts = optionTrades.filter((t) => t.status === "closed");
+  const closedOpts = optionTrades.filter((t) => t.status === "closed" || t.status === "assigned");
   const openOpts = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled");
   const optionRealized = closedOpts.reduce((s, t) => s + optionPnL(t, tradesById), 0);
   const optionUnrealized = openOpts.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
@@ -346,9 +338,8 @@ export default function Dashboard({ session }) {
 
   async function assignOptionTrade(id, assignDate) {
     setError("");
-    const tradesById = Object.fromEntries(trades.map((t) => [t.id, t]));
     const target = trades.find((t) => t.id === id);
-    const calc = assignmentStockTrade(target, tradesById);
+    const calc = assignmentStockTrade(target);
     if (!calc) { setError("No se pudo calcular la asignación de esta opción."); return; }
 
     const stockRow = {
@@ -551,8 +542,11 @@ export default function Dashboard({ session }) {
 
   const closedOptions = optionTrades.filter((t) => t.status === "closed");
   const assignedOptions = optionTrades.filter((t) => t.status === "assigned");
+  // "cerradas" a efectos de P&L: incluye las asignadas, porque ahora su prima se cuenta como
+  // ganancia propia (ver optionPnL), no se oculta dentro del precio del trade de acciones.
+  const realizedOptions = [...closedOptions, ...assignedOptions];
   const openOptions = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled");
-  const optionRealized = closedOptions.reduce((s, t) => s + optionPnL(t, tradesById), 0);
+  const optionRealized = realizedOptions.reduce((s, t) => s + optionPnL(t, tradesById), 0);
   const optionUnrealized = openOptions.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
 
   const dividendsTotal = currencyDividends.reduce((s, d) => s + d.amount, 0);
@@ -561,27 +555,27 @@ export default function Dashboard({ session }) {
   const totalPnL = realizedTotal + unrealizedTotal;
 
   const closedSells = stockTrades.filter((t) => t.action === "sell");
-  const closedForWinRate = [...closedSells, ...closedOptions];
+  const closedForWinRate = [...closedSells, ...realizedOptions];
   const wins = closedForWinRate.filter((t) => t.type === "option" ? optionPnL(t, tradesById) > 0 : (sellPnlById[t.id] ?? 0) > 0).length;
   const winRate = closedForWinRate.length ? (wins / closedForWinRate.length) * 100 : null;
 
   const chartData = useMemo(() => {
     const events = [];
     for (const t of closedSells) events.push({ date: t.date, pnl: sellPnlById[t.id] ?? 0 });
-    for (const t of closedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) });
+    for (const t of realizedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) });
     for (const d of currencyDividends) events.push({ date: d.date, pnl: d.amount });
     events.sort((a, b) => new Date(a.date) - new Date(b.date));
     let acc = 0;
     return events.map((e, i) => { acc += e.pnl; return { i: i + 1, date: e.date, acumulado: Math.round(acc * 100) / 100 }; });
-  }, [closedSells, closedOptions, sellPnlById, tradesById, currencyDividends]);
+  }, [closedSells, realizedOptions, sellPnlById, tradesById, currencyDividends]);
 
   const byTickerChart = useMemo(() => {
     const map = {};
     for (const t of closedSells) map[t.ticker] = (map[t.ticker] || 0) + (sellPnlById[t.id] ?? 0);
-    for (const t of closedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of realizedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t, tradesById);
     for (const d of currencyDividends) map[d.ticker] = (map[d.ticker] || 0) + d.amount;
     return Object.entries(map).map(([ticker, pnl]) => ({ ticker, pnl: Math.round(pnl * 100) / 100 })).sort((a, b) => b.pnl - a.pnl);
-  }, [closedSells, closedOptions, sellPnlById, tradesById, currencyDividends]);
+  }, [closedSells, realizedOptions, sellPnlById, tradesById, currencyDividends]);
 
   // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que a\u00fan tienes) ----------
   // Se excluye a prop\u00f3sito el P&L de ventas parciales de acciones: eso ya es una realizaci\u00f3n aparte,
@@ -589,7 +583,7 @@ export default function Dashboard({ session }) {
   const tickerAdjusted = useMemo(() => {
     const optMap = {};
     const divMap = {};
-    for (const t of closedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of realizedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
     for (const d of currencyDividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
       const optIncome = optMap[p.ticker] || 0;
@@ -602,7 +596,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, closedOptions, currencyDividends, tradesById, prices]);
+  }, [openPositions, realizedOptions, currencyDividends, tradesById, prices]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
@@ -1107,7 +1101,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onC
             const isOpen = isOption ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
             const expired = isOption && isOpen && t.expiration && t.expiration < todayStr;
             const pnl = isOption
-              ? (t.status === "closed" ? optionPnL(t, tradesById) : (t.status === "assigned" || t.status === "rolled") ? 0 : unrealizedOptionPnL(t, markPrices))
+              ? ((t.status === "closed" || t.status === "assigned") ? optionPnL(t, tradesById) : t.status === "rolled" ? 0 : unrealizedOptionPnL(t, markPrices))
               : (t.action === "sell" ? (sellPnlById[t.id] ?? 0) : null);
             const totalCommission = (t.commission || 0) + (t.closeCommission || 0);
             return (
@@ -1351,7 +1345,7 @@ function CloseModal({ trade, onCancel, onSave, onAssign, onRoll, tradesById }) {
   const [newPrice, setNewPrice] = useState("");
   const [newCommission, setNewCommission] = useState("");
 
-  const preview = mode === "assign" ? assignmentStockTrade(trade, tradesById) : null;
+  const preview = mode === "assign" ? assignmentStockTrade(trade) : null;
   const originalLeg = trade.legs?.[0];
 
   function submitRoll() {
@@ -1412,8 +1406,8 @@ function CloseModal({ trade, onCancel, onSave, onAssign, onRoll, tradesById }) {
           <>
             <div style={{ background: "var(--panel2)", border: "1px solid var(--border)", borderRadius: 6, padding: 12, fontSize: 13, marginBottom: 14, color: "var(--muted)" }}>
               Esto registrará automáticamente una <strong style={{ color: "var(--text)" }}>{preview.action === "buy" ? "compra" : "venta"}</strong> de{" "}
-              <strong style={{ color: "var(--text)" }}>{preview.shares} acciones</strong> de {trade.ticker} a un precio efectivo de{" "}
-              <strong style={{ color: "var(--text)" }}>{fmt(preview.price)}</strong> por acción (incluye toda la prima neta cobrada/pagada en esta cadena, más comisiones).
+              <strong style={{ color: "var(--text)" }}>{preview.shares} acciones</strong> de {trade.ticker} al precio real del strike:{" "}
+              <strong style={{ color: "var(--text)" }}>{fmt(preview.price)}</strong> por acción. La prima neta cobrada/pagada en esta cadena (más comisiones) queda registrada como ganancia propia de la opción, sin ocultarse en el precio de la acción.
             </div>
             <button className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }} onClick={() => onAssign(date)}>
               Confirmar asignación / ejercicio
