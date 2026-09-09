@@ -6,10 +6,20 @@ import {
 import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
+export const CURRENCIES = [
+  { code: "USD", symbol: "$" },
+  { code: "EUR", symbol: "€" },
+  { code: "GBP", symbol: "£" },
+];
+// símbolo activo — la vista de Dashboard lo actualiza según la divisa seleccionada,
+// así fmt()/fmtCompact() usan siempre el símbolo correcto en cualquier parte del archivo.
+let ACTIVE_SYMBOL = "$";
+function currencySymbol(code) { return CURRENCIES.find((c) => c.code === code)?.symbol || "$"; }
+
 const fmt = (n) =>
-  (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  (n < 0 ? `-${ACTIVE_SYMBOL}` : ACTIVE_SYMBOL) + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtCompact = (n) =>
-  (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  (n < 0 ? `-${ACTIVE_SYMBOL}` : ACTIVE_SYMBOL) + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
@@ -184,8 +194,10 @@ export default function Dashboard({ session }) {
   const [markPrices, setMarkPrices] = useState({});
   const [view, setView] = useState("dashboard"); // "dashboard" | "portfolio" | "cash" | "trades"
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [currency, setCurrency] = useState("USD");
   const autoRefreshedRef = useRef(false);
   const autoRefreshedOptionsRef = useRef(false);
+  ACTIVE_SYMBOL = currencySymbol(currency);
 
   const userId = session.user.id;
 
@@ -206,7 +218,7 @@ export default function Dashboard({ session }) {
     const pMap = {};
     (priceRows || []).forEach((r) => { pMap[r.ticker] = Number(r.price); });
     setPrices(pMap);
-    setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes })));
+    setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
     setLoading(false);
   }
 
@@ -219,6 +231,7 @@ export default function Dashboard({ session }) {
       commission: r.commission != null ? Number(r.commission) : 0,
       closeCommission: r.close_commission != null ? Number(r.close_commission) : 0,
       rolledFromId: r.rolled_from_id || null,
+      currency: r.currency || "USD",
     };
   }
 
@@ -229,6 +242,7 @@ export default function Dashboard({ session }) {
       price: data.price ?? null, action: data.action ?? null, legs: data.legs ?? null,
       status: data.type === "option" ? "open" : null, notes: data.notes || null,
       commission: data.commission ?? 0, expiration: data.expiration || null,
+      currency: data.currency || "USD",
     };
     const { data: inserted, error: err } = await supabase.from("trades").insert(row).select().single();
     if (err) { setError(err.message); return; }
@@ -265,7 +279,7 @@ export default function Dashboard({ session }) {
     const stockRow = {
       user_id: userId, type: "stock", ticker: target.ticker, date: assignDate, qty: calc.shares,
       price: Math.round(calc.price * 100) / 100, action: calc.action, legs: null, status: null,
-      commission: 0, expiration: null,
+      commission: 0, expiration: null, currency: target.currency || "USD",
       notes: `Asignación/ejercicio de opción ${legLabel(target.legs[0])} venc. ${target.expiration || ""}`,
     };
     const { data: insertedStock, error: err1 } = await supabase.from("trades").insert(stockRow).select().single();
@@ -303,7 +317,7 @@ export default function Dashboard({ session }) {
       user_id: userId, type: "option", ticker: target.ticker, date: rollDate, qty: target.qty,
       legs: [{ action: leg.action, optionType: newLeg.optionType, strike: Number(newLeg.strike), price: Number(newLeg.price), closePrice: null }],
       status: "open", expiration: newExpiration, commission: Number(newCommission) || 0,
-      notes: `Roll desde venc. ${target.expiration || ""}`, rolled_from_id: id,
+      notes: `Roll desde venc. ${target.expiration || ""}`, rolled_from_id: id, currency: target.currency || "USD",
     };
     const { data: insertedNew, error: err2 } = await supabase.from("trades").insert(newRow).select().single();
     if (err2) { setError(err2.message); return; }
@@ -372,10 +386,10 @@ export default function Dashboard({ session }) {
 
   async function addCashTx(data) {
     setError("");
-    const row = { user_id: userId, date: data.date, type: data.type, amount: data.amount, notes: data.notes || null };
+    const row = { user_id: userId, date: data.date, type: data.type, amount: data.amount, notes: data.notes || null, currency: data.currency || "USD" };
     const { data: inserted, error: err } = await supabase.from("cash_transactions").insert(row).select().single();
     if (err) { setError(err.message); return; }
-    setCashTx((prev) => [...prev, { id: inserted.id, date: inserted.date, type: inserted.type, amount: Number(inserted.amount), notes: inserted.notes }]);
+    setCashTx((prev) => [...prev, { id: inserted.id, date: inserted.date, type: inserted.type, amount: Number(inserted.amount), notes: inserted.notes, currency: inserted.currency || "USD" }]);
     setShowAddCash(false);
   }
 
@@ -386,8 +400,14 @@ export default function Dashboard({ session }) {
   }
 
   // ---------- derived ----------
-  const stockTrades = useMemo(() => trades.filter((t) => t.type === "stock"), [trades]);
-  const optionTrades = useMemo(() => trades.filter((t) => t.type === "option"), [trades]);
+  // tradesById usa TODOS los trades (sin filtrar) para poder resolver cadenas de roll aunque
+  // el eslabón anterior perteneciera a otra vista; el resto de cálculos sí se filtra por divisa.
+  const tradesById = useMemo(() => Object.fromEntries(trades.map((t) => [t.id, t])), [trades]);
+  const currencyTrades = useMemo(() => trades.filter((t) => (t.currency || "USD") === currency), [trades, currency]);
+  const currencyCashTx = useMemo(() => cashTx.filter((c) => (c.currency || "USD") === currency), [cashTx, currency]);
+
+  const stockTrades = useMemo(() => currencyTrades.filter((t) => t.type === "stock"), [currencyTrades]);
+  const optionTrades = useMemo(() => currencyTrades.filter((t) => t.type === "option"), [currencyTrades]);
 
   const { positions, sellPnlById } = useMemo(() => {
     const byTicker = {};
@@ -418,8 +438,6 @@ export default function Dashboard({ session }) {
   const totalMarketValue = openPositions.reduce((s, p) => s + (prices[p.ticker] ?? p.avgCost) * p.shares, 0);
   const stockRealized = positions.reduce((s, p) => s + p.realized, 0);
   const stockUnrealized = openPositions.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
-
-  const tradesById = useMemo(() => Object.fromEntries(trades.map((t) => [t.id, t])), [trades]);
 
   const closedOptions = optionTrades.filter((t) => t.status === "closed");
   const assignedOptions = optionTrades.filter((t) => t.status === "assigned");
@@ -458,16 +476,16 @@ export default function Dashboard({ session }) {
   ];
 
   // ---------- cuenta de efectivo ----------
-  const netDeposits = cashTx.reduce((s, c) => s + (c.type === "deposit" ? c.amount : -c.amount), 0);
+  const netDeposits = currencyCashTx.reduce((s, c) => s + (c.type === "deposit" ? c.amount : -c.amount), 0);
   const accountValue = netDeposits + totalPnL;
   const totalReturnPct = netDeposits > 0 ? (totalPnL / netDeposits) * 100 : null;
 
   // serie de depósitos netos acumulados en el tiempo, para saber el capital aportado "a fecha de"
   const capitalPoints = useMemo(() => {
-    const sorted = [...cashTx].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const sorted = [...currencyCashTx].sort((a, b) => new Date(a.date) - new Date(b.date));
     let acc = 0;
     return sorted.map((c) => { acc += c.type === "deposit" ? c.amount : -c.amount; return { date: c.date, value: acc }; });
-  }, [cashTx]);
+  }, [currencyCashTx]);
 
   // serie de P&L realizado acumulado en el tiempo (reutiliza los mismos eventos que chartData)
   const realizedPoints = chartData; // [{date, acumulado}]
@@ -488,7 +506,7 @@ export default function Dashboard({ session }) {
   function isoMonthsAgo(n) { const d = new Date(today); d.setMonth(d.getMonth() - n); return d.toISOString().slice(0, 10); }
   function firstOfMonth() { return new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10); }
   function firstOfYear() { return new Date(today.getFullYear(), 0, 1).toISOString().slice(0, 10); }
-  const earliestDate = [...cashTx.map((c) => c.date), ...trades.map((t) => t.date)].sort()[0] || todayStr;
+  const earliestDate = [...currencyCashTx.map((c) => c.date), ...currencyTrades.map((t) => t.date)].sort()[0] || todayStr;
 
   const PERIODS = [
     { id: "1w", label: "1S", start: isoDaysAgo(7) },
@@ -507,7 +525,7 @@ export default function Dashboard({ session }) {
   const capitalAtStart = valueAsOf(capitalPoints, activePeriod.start, "value");
   const periodReturnPct = capitalAtStart > 0 ? (periodResult / capitalAtStart) * 100 : null;
 
-  const depositsInPeriod = cashTx.filter((c) => c.date >= activePeriod.start && c.date <= todayStr);
+  const depositsInPeriod = currencyCashTx.filter((c) => c.date >= activePeriod.start && c.date <= todayStr);
 
   // serie combinada de valor de cuenta (capital aportado + P&L realizado) para la gráfica
   const accountValueChart = useMemo(() => {
@@ -549,6 +567,11 @@ export default function Dashboard({ session }) {
           </div>
         </div>
         <div className="top-actions">
+          <div className="tabs">
+            {CURRENCIES.map((c) => (
+              <button key={c.code} className={`tab ${currency === c.code ? "active" : ""}`} onClick={() => setCurrency(c.code)}>{c.code}</button>
+            ))}
+          </div>
           <button className="btn btn-gold" onClick={() => setShowAdd(true)}><Plus size={16} /> Nuevo trade</button>
           <button className="btn btn-ghost" onClick={signOut}><LogOut size={15} /></button>
         </div>
@@ -682,12 +705,12 @@ export default function Dashboard({ session }) {
 
           <div style={{ marginTop: 16 }}>
             <div className="field-label" style={{ marginBottom: 8 }}>Movimientos de efectivo</div>
-            {cashTx.length === 0 ? <div className="empty">Sin movimientos aún</div> : (
+            {currencyCashTx.length === 0 ? <div className="empty">Sin movimientos aún</div> : (
               <div className="table-wrap">
                 <table>
                   <thead><tr><th>Fecha</th><th>Tipo</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
                   <tbody>
-                    {[...cashTx].sort((a, b) => new Date(b.date) - new Date(a.date)).map((c) => (
+                    {[...currencyCashTx].sort((a, b) => new Date(b.date) - new Date(a.date)).map((c) => (
                       <tr key={c.id}>
                         <td className="mono" style={{ fontSize: 12 }}>{c.date}</td>
                         <td><span className={`badge ${c.type === "deposit" ? "badge-closed" : "badge-open"}`}>{c.type === "deposit" ? "Depósito" : "Retiro"}</span></td>
@@ -808,7 +831,7 @@ export default function Dashboard({ session }) {
             </div>
           </div>
           <TradeTable
-            trades={trades.filter((t) => {
+            trades={currencyTrades.filter((t) => {
               const isOpen = t.type === "option" ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
               if (tab === "open") return isOpen;
               if (tab === "closed") return !isOpen;
@@ -826,8 +849,8 @@ export default function Dashboard({ session }) {
         </div>
       </div>
 
-      {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} />}
-      {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} />}
+      {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} defaultCurrency={currency} />}
+      {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} defaultCurrency={currency} />}
       {closingTrade && (
         <CloseModal
           trade={closingTrade}
@@ -903,13 +926,14 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onC
   );
 }
 
-function AddTradeModal({ onCancel, onSave }) {
+function AddTradeModal({ onCancel, onSave, defaultCurrency }) {
   const [type, setType] = useState("stock");
   const [ticker, setTicker] = useState("");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [qty, setQty] = useState("");
   const [notes, setNotes] = useState("");
   const [commission, setCommission] = useState("");
+  const [currency, setCurrency] = useState(defaultCurrency || "USD");
   // stock
   const [action, setAction] = useState("buy");
   const [price, setPrice] = useState("");
@@ -934,12 +958,12 @@ function AddTradeModal({ onCancel, onSave }) {
     const commissionNum = Number(commission) || 0;
     if (type === "stock") {
       if (!price) return;
-      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes, commission: commissionNum });
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes, commission: commissionNum, currency });
     } else {
       if (!expiration) return;
       if (legs.some((l) => l.strike === "" || l.price === "")) return;
       const cleanLegs = legs.map((l) => ({ action: l.action, optionType: l.optionType, strike: Number(l.strike), price: Number(l.price), closePrice: null }));
-      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum, expiration });
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum, expiration, currency });
     }
   }
 
@@ -959,6 +983,11 @@ function AddTradeModal({ onCancel, onSave }) {
         <div className="form-grid">
           <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL" /></div>
           <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          <div className="field"><div className="field-label">Divisa</div>
+            <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>)}
+            </select>
+          </div>
 
           {type === "stock" ? (
             <>
@@ -966,7 +995,7 @@ function AddTradeModal({ onCancel, onSave }) {
                 <select value={action} onChange={(e) => setAction(e.target.value)}><option value="buy">Compra</option><option value="sell">Venta</option></select>
               </div>
               <div className="field"><div className="field-label">Acciones</div><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
-              <div className="field"><div className="field-label">Precio ($)</div><input type="number" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Precio</div><input type="number" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
             </>
           ) : (
             <>
@@ -1005,15 +1034,16 @@ function AddTradeModal({ onCancel, onSave }) {
   );
 }
 
-function AddCashModal({ onCancel, onSave }) {
+function AddCashModal({ onCancel, onSave, defaultCurrency }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [type, setType] = useState("deposit");
   const [amount, setAmount] = useState("");
   const [notes, setNotes] = useState("");
+  const [currency, setCurrency] = useState(defaultCurrency || "USD");
 
   function submit() {
     if (!amount || Number(amount) <= 0) return;
-    onSave({ date, type, amount: Number(amount), notes });
+    onSave({ date, type, amount: Number(amount), notes, currency });
   }
 
   return (
@@ -1031,7 +1061,12 @@ function AddCashModal({ onCancel, onSave }) {
 
         <div className="form-grid">
           <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-          <div className="field"><div className="field-label">Monto ($)</div><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /></div>
+          <div className="field"><div className="field-label">Divisa</div>
+            <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Monto</div><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /></div>
           <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Notas (opcional)</div><input value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
         </div>
 
