@@ -3,7 +3,7 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 export const CURRENCIES = [
@@ -583,6 +583,27 @@ export default function Dashboard({ session }) {
     return Object.entries(map).map(([ticker, pnl]) => ({ ticker, pnl: Math.round(pnl * 100) / 100 })).sort((a, b) => b.pnl - a.pnl);
   }, [closedSells, closedOptions, sellPnlById, tradesById, currencyDividends]);
 
+  // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que a\u00fan tienes) ----------
+  // Se excluye a prop\u00f3sito el P&L de ventas parciales de acciones: eso ya es una realizaci\u00f3n aparte,
+  // no un ingreso extra que deba \"rebajar\" el costo de las acciones que sigues teniendo.
+  const tickerAdjusted = useMemo(() => {
+    const optMap = {};
+    const divMap = {};
+    for (const t of closedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const d of currencyDividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
+    return openPositions.map((p) => {
+      const optIncome = optMap[p.ticker] || 0;
+      const divIncome = divMap[p.ticker] || 0;
+      const totalIncome = optIncome + divIncome;
+      const adjustedAvg = p.avgCost - totalIncome / p.shares;
+      const curPrice = prices[p.ticker] ?? p.avgCost;
+      const costBasis = p.avgCost * p.shares;
+      const pctRecovered = costBasis > 0 ? (totalIncome / costBasis) * 100 : null;
+      const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
+      return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct };
+    }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
+  }, [openPositions, closedOptions, currencyDividends, tradesById, prices]);
+
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
     ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: unrealizedOptionPnL(t, markPrices) })),
@@ -710,6 +731,7 @@ export default function Dashboard({ session }) {
           {[
             { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
             { id: "portfolio", label: "Portafolio", icon: Briefcase },
+            { id: "byticker", label: "Por Ticker", icon: Percent },
             { id: "cash", label: "Cuenta de efectivo", icon: Wallet },
             { id: "trades", label: "Trades", icon: ListOrdered },
           ].map((item) => (
@@ -926,6 +948,45 @@ export default function Dashboard({ session }) {
           )}
         </div>
         </>
+        )}
+
+        {view === "byticker" && (
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Precio medio ajustado por ticker</div>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones cerradas y los dividendos cobrados sobre las acciones que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. El % de rendimiento total suma todo: valorización + primas + dividendos, sobre lo que invertiste.
+          </div>
+          {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones en portafolio</div> : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ticker</th><th>Acciones</th><th>$ Compra</th><th>+ Primas</th><th>+ Dividendos</th>
+                    <th>$ Ajustado</th><th>% Recuperado</th><th>% Rendimiento total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tickerAdjusted.map((r) => (
+                    <tr key={r.ticker}>
+                      <td style={{ fontWeight: 500 }}>{r.ticker}</td>
+                      <td className="mono">{r.shares}</td>
+                      <td className="mono">{fmt(r.avgCost)}</td>
+                      <td className="mono" style={{ color: r.optIncome > 0 ? "var(--gain)" : "var(--muted)" }}>{r.optIncome > 0 ? fmt(r.optIncome) : "—"}</td>
+                      <td className="mono" style={{ color: r.divIncome > 0 ? "var(--gain)" : "var(--muted)" }}>{r.divIncome > 0 ? fmt(r.divIncome) : "—"}</td>
+                      <td className="mono" style={{ fontWeight: 600 }}>{fmt(r.adjustedAvg)}</td>
+                      <td className="mono" style={{ color: "var(--gold)" }}>{r.pctRecovered == null ? "—" : `${r.pctRecovered.toFixed(1)}%`}</td>
+                      <td className="mono" style={{ color: r.totalReturnPct == null ? "var(--muted)" : r.totalReturnPct >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                        {r.totalReturnPct == null ? "—" : `${r.totalReturnPct >= 0 ? "+" : ""}${r.totalReturnPct.toFixed(1)}%`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
         )}
 
         {view === "portfolio" && (
