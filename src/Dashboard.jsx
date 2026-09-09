@@ -3,7 +3,7 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const fmt = (n) =>
@@ -182,6 +182,8 @@ export default function Dashboard({ session }) {
   const [period, setPeriod] = useState("mtd");
   const [refreshing, setRefreshing] = useState(false);
   const [markPrices, setMarkPrices] = useState({});
+  const [view, setView] = useState("dashboard"); // "dashboard" | "portfolio" | "cash" | "trades"
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const autoRefreshedRef = useRef(false);
   const autoRefreshedOptionsRef = useRef(false);
 
@@ -539,9 +541,12 @@ export default function Dashboard({ session }) {
   return (
     <div className="app">
       <div className="header">
-        <div>
-          <div className="eyebrow">BITÁCORA · {session.user.email}</div>
-          <div className="h1">Mi Bitácora de Trading</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button className="hamburger-btn" onClick={() => setSidebarOpen(true)}><Menu size={18} /></button>
+          <div>
+            <div className="eyebrow">BITÁCORA · {session.user.email}</div>
+            <div className="h1">Mi Bitácora de Trading</div>
+          </div>
         </div>
         <div className="top-actions">
           <button className="btn btn-gold" onClick={() => setShowAdd(true)}><Plus size={16} /> Nuevo trade</button>
@@ -561,9 +566,32 @@ export default function Dashboard({ session }) {
         </div>
       )}
 
-      <div className="content">
-        {error && <div className="error-banner">{error}</div>}
+      <div className={`sidebar-overlay ${sidebarOpen ? "open" : ""}`} onClick={() => setSidebarOpen(false)} />
 
+      <div className="app-body">
+        <div className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+          <div className="sidebar-label">Principal</div>
+          {[
+            { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+            { id: "portfolio", label: "Portafolio", icon: Briefcase },
+            { id: "cash", label: "Cuenta de efectivo", icon: Wallet },
+            { id: "trades", label: "Trades", icon: ListOrdered },
+          ].map((item) => (
+            <button
+              key={item.id}
+              className={`sidebar-item ${view === item.id ? "active" : ""}`}
+              onClick={() => { setView(item.id); setSidebarOpen(false); }}
+            >
+              <item.icon size={16} /> {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="content" style={{ flex: 1, minWidth: 0 }}>
+          {error && <div className="error-banner">{error}</div>}
+
+        {view === "dashboard" && (
+        <>
         <div className="cards">
           <div className="card">
             <div className="card-label">P&L Realizado</div>
@@ -588,7 +616,10 @@ export default function Dashboard({ session }) {
             <div className="card-sub">{wins}/{closedForWinRate.length} ganadores</div>
           </div>
         </div>
+        </>
+        )}
 
+        {view === "cash" && (
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Cuenta de efectivo</div>
@@ -671,7 +702,9 @@ export default function Dashboard({ session }) {
             )}
           </div>
         </div>
+        )}
 
+        {view === "dashboard" && (
         <div className="grid-2">
           <div className="panel">
             <div className="panel-head"><div className="panel-title">Curva de P&L acumulado</div></div>
@@ -707,7 +740,9 @@ export default function Dashboard({ session }) {
             )}
           </div>
         </div>
+        )}
 
+        {view === "portfolio" && (
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Portafolio — acciones</div>
@@ -751,7 +786,9 @@ export default function Dashboard({ session }) {
             </div>
           )}
         </div>
+        )}
 
+        {view === "trades" && (
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Historial de trades</div>
@@ -784,6 +821,8 @@ export default function Dashboard({ session }) {
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
           />
+        </div>
+        )}
         </div>
       </div>
 
