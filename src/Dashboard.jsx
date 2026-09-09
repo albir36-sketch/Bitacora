@@ -61,37 +61,85 @@ function legPnL(leg) {
   if (leg.closePrice == null) return 0;
   return leg.action === "sell" ? (leg.price - leg.closePrice) : (leg.closePrice - leg.price);
 }
-function optionPnL(t) {
-  if (t.status === "assigned") return 0; // el resultado ya quedó reflejado en el trade de acciones vinculado
+function legSign(leg) { return leg.action === "sell" ? 1 : -1; }
+
+// Reconstruye la cadena de rolls desde el primer eslabón hasta `trade` (inclusive)
+function getRollChain(trade, tradesById) {
+  const chain = [];
+  let cur = trade;
+  let guard = 0;
+  while (cur && guard < 50) {
+    chain.unshift(cur);
+    cur = cur.rolledFromId && tradesById ? tradesById[cur.rolledFromId] : null;
+    guard++;
+  }
+  return chain;
+}
+
+// Suma la prima neta por acción y las comisiones acumuladas a lo largo de toda la cadena de rolls
+// que termina en `trade` (incluye la apertura de `trade`, pero NO su propio cierre/asignación final,
+// eso lo resuelve quien llame a esta función).
+function chainAccumulated(trade, tradesById) {
+  const chain = getRollChain(trade, tradesById);
+  let netPremium = 0;
+  let totalCommission = 0;
+  chain.forEach((t, i) => {
+    const leg = (t.legs || [])[0];
+    if (!leg) return;
+    const sign = legSign(leg);
+    netPremium += sign * leg.price;
+    totalCommission += t.commission || 0;
+    const isLast = i === chain.length - 1;
+    if (!isLast) {
+      // este eslabón se cerró para dar paso al siguiente roll: descuenta su costo de cierre
+      netPremium -= sign * (leg.closePrice || 0);
+      totalCommission += t.closeCommission || 0;
+    }
+  });
+  return { netPremium, totalCommission };
+}
+
+function optionPnL(t, tradesById) {
+  if (t.status === "assigned" || t.status === "rolled") return 0; // resultado diferido a otro trade
   if (t.status !== "closed") return 0;
   const legs = t.legs || [];
+  if (legs.length === 1) {
+    const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
+    const leg = legs[0];
+    const sign = legSign(leg);
+    const finalNet = netPremium - sign * (leg.closePrice || 0);
+    return finalNet * t.qty * 100 - totalCommission - (t.closeCommission || 0);
+  }
+  // spreads de varias patas: no soportan roll, se calcula como antes
   const perContract = legs.reduce((s, l) => s + legPnL(l), 0);
   return perContract * t.qty * 100 - (t.commission || 0) - (t.closeCommission || 0);
 }
 // Calcula el precio efectivo (y la acción) del trade de acciones que se genera al asignar/ejercer
-// una opción de una sola pata, incorporando la prima cobrada/pagada y la comisión de apertura.
-function assignmentStockTrade(t) {
+// una opción de una sola pata, incorporando TODA la cadena de primas cobradas/pagadas en los rolls
+// previos, más las comisiones acumuladas.
+function assignmentStockTrade(t, tradesById) {
   const leg = (t.legs || [])[0];
   if (!leg) return null;
   const shares = t.qty * 100;
-  const commissionPerShare = shares > 0 ? (t.commission || 0) / shares : 0;
+  const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
+  const commissionPerShare = shares > 0 ? totalCommission / shares : 0;
   let price, action;
   if (leg.action === "sell" && leg.optionType === "put") {
-    // CSP asignada: te compran (te obligan a comprar) acciones al strike; la prima cobrada rebaja tu costo
+    // CSP asignada: te obligan a comprar acciones al strike; la prima neta cobrada rebaja tu costo
     action = "buy";
-    price = leg.strike - leg.price + commissionPerShare;
+    price = leg.strike - netPremium + commissionPerShare;
   } else if (leg.action === "sell" && leg.optionType === "call") {
-    // CC asignada: te retiran (vendes) las acciones al strike; la prima cobrada se suma a lo recibido
+    // CC asignada: te retiran las acciones al strike; la prima neta cobrada se suma a lo recibido
     action = "sell";
-    price = leg.strike + leg.price - commissionPerShare;
+    price = leg.strike + netPremium - commissionPerShare;
   } else if (leg.action === "buy" && leg.optionType === "call") {
-    // Call comprada, ejercida: compras acciones al strike; la prima pagada se suma a tu costo
+    // Call comprada, ejercida: compras acciones al strike; la prima neta pagada se suma a tu costo
     action = "buy";
-    price = leg.strike + leg.price + commissionPerShare;
+    price = leg.strike - netPremium + commissionPerShare;
   } else {
-    // Put comprada, ejercida: vendes acciones al strike; la prima pagada rebaja lo recibido
+    // Put comprada, ejercida: vendes acciones al strike; la prima neta pagada rebaja lo recibido
     action = "sell";
-    price = leg.strike - leg.price - commissionPerShare;
+    price = leg.strike + netPremium - commissionPerShare;
   }
   return { action, price: Math.max(0, price), shares };
 }
@@ -106,7 +154,7 @@ function tradeLabel(t) {
 }
 // P&L no realizado de una opción abierta, usando precios de mercado (occSymbol -> precio) si están disponibles
 function unrealizedOptionPnL(t, markPrices) {
-  if (t.status === "closed" || t.status === "assigned") return null;
+  if (t.status === "closed" || t.status === "assigned" || t.status === "rolled") return null;
   const legs = t.legs || [];
   let perContract = 0;
   let anyMark = false;
@@ -168,6 +216,7 @@ export default function Dashboard({ session }) {
       notes: r.notes, expiration: r.expiration || null,
       commission: r.commission != null ? Number(r.commission) : 0,
       closeCommission: r.close_commission != null ? Number(r.close_commission) : 0,
+      rolledFromId: r.rolled_from_id || null,
     };
   }
 
@@ -206,8 +255,9 @@ export default function Dashboard({ session }) {
 
   async function assignOptionTrade(id, assignDate) {
     setError("");
+    const tradesById = Object.fromEntries(trades.map((t) => [t.id, t]));
     const target = trades.find((t) => t.id === id);
-    const calc = assignmentStockTrade(target);
+    const calc = assignmentStockTrade(target, tradesById);
     if (!calc) { setError("No se pudo calcular la asignación de esta opción."); return; }
 
     const stockRow = {
@@ -228,6 +278,37 @@ export default function Dashboard({ session }) {
     setTrades((prev) => [
       ...prev.map((t) => (t.id === id ? { ...t, status: "assigned", closeDate: assignDate } : t)),
       fromRow(insertedStock),
+    ]);
+    setClosingTrade(null);
+  }
+
+  async function rollOptionTrade(id, rollDate, closePrice, closeCommission, newLeg, newExpiration, newCommission) {
+    setError("");
+    const target = trades.find((t) => t.id === id);
+    const leg = target.legs[0];
+    const closedLegs = [{ ...leg, closePrice: Number(closePrice) }];
+    const cc = Number(closeCommission) || 0;
+
+    // 1) cierra el tramo actual (da paso al nuevo)
+    const { error: err1 } = await supabase
+      .from("trades")
+      .update({ status: "rolled", close_date: rollDate, legs: closedLegs, close_commission: cc })
+      .eq("id", id);
+    if (err1) { setError(err1.message); return; }
+
+    // 2) abre el nuevo tramo, encadenado al anterior
+    const newRow = {
+      user_id: userId, type: "option", ticker: target.ticker, date: rollDate, qty: target.qty,
+      legs: [{ action: leg.action, optionType: newLeg.optionType, strike: Number(newLeg.strike), price: Number(newLeg.price), closePrice: null }],
+      status: "open", expiration: newExpiration, commission: Number(newCommission) || 0,
+      notes: `Roll desde venc. ${target.expiration || ""}`, rolled_from_id: id,
+    };
+    const { data: insertedNew, error: err2 } = await supabase.from("trades").insert(newRow).select().single();
+    if (err2) { setError(err2.message); return; }
+
+    setTrades((prev) => [
+      ...prev.map((t) => (t.id === id ? { ...t, status: "rolled", closeDate: rollDate, legs: closedLegs, closeCommission: cc } : t)),
+      fromRow(insertedNew),
     ]);
     setClosingTrade(null);
   }
@@ -336,10 +417,12 @@ export default function Dashboard({ session }) {
   const stockRealized = positions.reduce((s, p) => s + p.realized, 0);
   const stockUnrealized = openPositions.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
 
+  const tradesById = useMemo(() => Object.fromEntries(trades.map((t) => [t.id, t])), [trades]);
+
   const closedOptions = optionTrades.filter((t) => t.status === "closed");
   const assignedOptions = optionTrades.filter((t) => t.status === "assigned");
-  const openOptions = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned");
-  const optionRealized = closedOptions.reduce((s, t) => s + optionPnL(t), 0);
+  const openOptions = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled");
+  const optionRealized = closedOptions.reduce((s, t) => s + optionPnL(t, tradesById), 0);
   const optionUnrealized = openOptions.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
 
   const realizedTotal = stockRealized + optionRealized;
@@ -348,24 +431,24 @@ export default function Dashboard({ session }) {
 
   const closedSells = stockTrades.filter((t) => t.action === "sell");
   const closedForWinRate = [...closedSells, ...closedOptions];
-  const wins = closedForWinRate.filter((t) => t.type === "option" ? optionPnL(t) > 0 : (sellPnlById[t.id] ?? 0) > 0).length;
+  const wins = closedForWinRate.filter((t) => t.type === "option" ? optionPnL(t, tradesById) > 0 : (sellPnlById[t.id] ?? 0) > 0).length;
   const winRate = closedForWinRate.length ? (wins / closedForWinRate.length) * 100 : null;
 
   const chartData = useMemo(() => {
     const events = [];
     for (const t of closedSells) events.push({ date: t.date, pnl: sellPnlById[t.id] ?? 0 });
-    for (const t of closedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t) });
+    for (const t of closedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) });
     events.sort((a, b) => new Date(a.date) - new Date(b.date));
     let acc = 0;
     return events.map((e, i) => { acc += e.pnl; return { i: i + 1, date: e.date, acumulado: Math.round(acc * 100) / 100 }; });
-  }, [closedSells, closedOptions, sellPnlById]);
+  }, [closedSells, closedOptions, sellPnlById, tradesById]);
 
   const byTickerChart = useMemo(() => {
     const map = {};
     for (const t of closedSells) map[t.ticker] = (map[t.ticker] || 0) + (sellPnlById[t.id] ?? 0);
-    for (const t of closedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t);
+    for (const t of closedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t, tradesById);
     return Object.entries(map).map(([ticker, pnl]) => ({ ticker, pnl: Math.round(pnl * 100) / 100 })).sort((a, b) => b.pnl - a.pnl);
-  }, [closedSells, closedOptions, sellPnlById]);
+  }, [closedSells, closedOptions, sellPnlById, tradesById]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
@@ -689,13 +772,14 @@ export default function Dashboard({ session }) {
           </div>
           <TradeTable
             trades={trades.filter((t) => {
-              const isOpen = t.type === "option" ? (t.status !== "closed" && t.status !== "assigned") : t.action === "buy";
+              const isOpen = t.type === "option" ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
               if (tab === "open") return isOpen;
               if (tab === "closed") return !isOpen;
               return true;
             })}
             sellPnlById={sellPnlById}
             markPrices={markPrices}
+            tradesById={tradesById}
             onDelete={deleteTrade}
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
@@ -711,13 +795,16 @@ export default function Dashboard({ session }) {
           onCancel={() => setClosingTrade(null)}
           onSave={(date, legCloses, closeCommission) => closeOptionTrade(closingTrade.id, date, legCloses, closeCommission)}
           onAssign={(date) => assignOptionTrade(closingTrade.id, date)}
+          onRoll={(date, closePrice, closeCommission, newLeg, newExpiration, newCommission) =>
+            rollOptionTrade(closingTrade.id, date, closePrice, closeCommission, newLeg, newExpiration, newCommission)}
+          tradesById={tradesById}
         />
       )}
     </div>
   );
 }
 
-function TradeTable({ trades, sellPnlById, markPrices, onDelete, onClose, onReopen }) {
+function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onClose, onReopen }) {
   if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
   const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -729,10 +816,11 @@ function TradeTable({ trades, sellPnlById, markPrices, onDelete, onClose, onReop
           {sorted.map((t) => {
             const isOption = t.type === "option";
             const isAssigned = isOption && t.status === "assigned";
-            const isOpen = isOption ? (t.status !== "closed" && t.status !== "assigned") : t.action === "buy";
+            const isRolled = isOption && t.status === "rolled";
+            const isOpen = isOption ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
             const expired = isOption && isOpen && t.expiration && t.expiration < todayStr;
             const pnl = isOption
-              ? (t.status === "closed" ? optionPnL(t) : t.status === "assigned" ? 0 : unrealizedOptionPnL(t, markPrices))
+              ? (t.status === "closed" ? optionPnL(t, tradesById) : (t.status === "assigned" || t.status === "rolled") ? 0 : unrealizedOptionPnL(t, markPrices))
               : (t.action === "sell" ? (sellPnlById[t.id] ?? 0) : null);
             const totalCommission = (t.commission || 0) + (t.closeCommission || 0);
             return (
@@ -742,22 +830,27 @@ function TradeTable({ trades, sellPnlById, markPrices, onDelete, onClose, onReop
                 <td style={{ fontSize: 13 }}>
                   {tradeLabel(t)}
                   {isOption && t.expiration && <div style={{ fontSize: 11, color: "var(--muted)" }}>Vence {t.expiration}</div>}
-                  {t.notes && t.notes.startsWith("Asignación") && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
+                  {t.notes && (t.notes.startsWith("Asignación") || t.notes.startsWith("Roll")) && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
                 </td>
                 <td className="mono">{t.qty}</td>
                 <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmt(totalCommission) : "—"}</td>
                 <td>
                   <span
-                    className={`badge ${expired ? "badge-open" : isAssigned ? "badge-closed" : isOpen ? "badge-open" : "badge-closed"}`}
-                    style={expired ? { background: "#3A1A1A", color: "var(--loss)" } : isAssigned ? { background: "#1A2A3A", color: "#7EC8E3" } : undefined}
+                    className={`badge ${expired ? "badge-open" : (isAssigned || isRolled) ? "badge-closed" : isOpen ? "badge-open" : "badge-closed"}`}
+                    style={
+                      expired ? { background: "#3A1A1A", color: "var(--loss)" }
+                      : isAssigned ? { background: "#1A2A3A", color: "#7EC8E3" }
+                      : isRolled ? { background: "#241A3A", color: "#C7A6F5" }
+                      : undefined
+                    }
                   >
-                    {expired ? "Vencida" : isAssigned ? "Asignada" : isOpen ? "Abierto" : "Cerrado"}
+                    {expired ? "Vencida" : isAssigned ? "Asignada" : isRolled ? "Rolada" : isOpen ? "Abierto" : "Cerrado"}
                   </span>
                 </td>
                 <td className="mono" style={{ color: pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pnl == null ? "—" : fmt(pnl)}</td>
                 <td>
                   <div style={{ display: "flex", gap: 6 }}>
-                    {isOption && isOpen && <button className="icon-btn" style={{ color: "var(--gain)" }} title="Cerrar / Asignar" onClick={() => onClose(t)}><CheckCircle2 size={15} /></button>}
+                    {isOption && isOpen && <button className="icon-btn" style={{ color: "var(--gain)" }} title="Cerrar / Asignar / Roll" onClick={() => onClose(t)}><CheckCircle2 size={15} /></button>}
                     {isOption && t.status === "closed" && <button className="icon-btn" style={{ color: "var(--muted)" }} title="Reabrir" onClick={() => onReopen(t.id)}><RotateCcw size={15} /></button>}
                     <button className="icon-btn" style={{ color: "var(--loss)" }} title="Eliminar" onClick={() => onDelete(t.id)}><Trash2 size={15} /></button>
                   </div>
@@ -909,14 +1002,32 @@ function AddCashModal({ onCancel, onSave }) {
   );
 }
 
-function CloseModal({ trade, onCancel, onSave, onAssign }) {
+function CloseModal({ trade, onCancel, onSave, onAssign, onRoll, tradesById }) {
   const canAssign = (trade.legs || []).length === 1;
-  const [mode, setMode] = useState("close"); // "close" | "assign"
+  const [mode, setMode] = useState("close"); // "close" | "assign" | "roll"
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [legCloses, setLegCloses] = useState((trade.legs || []).map(() => ""));
   const [closeCommission, setCloseCommission] = useState("");
 
-  const preview = mode === "assign" ? assignmentStockTrade(trade) : null;
+  // campos para el modo "roll"
+  const [rollClosePrice, setRollClosePrice] = useState("");
+  const [rollCloseCommission, setRollCloseCommission] = useState("");
+  const [newExpiration, setNewExpiration] = useState("");
+  const [newStrike, setNewStrike] = useState(trade.legs?.[0]?.strike ?? "");
+  const [newPrice, setNewPrice] = useState("");
+  const [newCommission, setNewCommission] = useState("");
+
+  const preview = mode === "assign" ? assignmentStockTrade(trade, tradesById) : null;
+  const originalLeg = trade.legs?.[0];
+
+  function submitRoll() {
+    if (!rollClosePrice || !newExpiration || !newStrike || !newPrice) return;
+    onRoll(
+      date, rollClosePrice, rollCloseCommission,
+      { optionType: originalLeg.optionType, strike: newStrike, price: newPrice },
+      newExpiration, newCommission
+    );
+  }
 
   return (
     <div className="modal-overlay">
@@ -924,18 +1035,21 @@ function CloseModal({ trade, onCancel, onSave, onAssign }) {
         <div className="modal-head"><div className="modal-title">Cerrar posición — {trade.ticker}</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
 
         {canAssign && (
-          <div className="type-toggle">
+          <div className="type-toggle" style={{ flexWrap: "wrap" }}>
             <button onClick={() => setMode("close")} style={{ background: mode === "close" ? "var(--gold)" : "transparent", color: mode === "close" ? "#1A1300" : "var(--muted)", border: `1px solid ${mode === "close" ? "var(--gold)" : "var(--border)"}` }}>
-              Cerrar pagando/cobrando prima
+              Cerrar con prima
             </button>
             <button onClick={() => setMode("assign")} style={{ background: mode === "assign" ? "var(--gold)" : "transparent", color: mode === "assign" ? "#1A1300" : "var(--muted)", border: `1px solid ${mode === "assign" ? "var(--gold)" : "var(--border)"}` }}>
               Asignación / Ejercicio
+            </button>
+            <button onClick={() => setMode("roll")} style={{ background: mode === "roll" ? "var(--gold)" : "transparent", color: mode === "roll" ? "#1A1300" : "var(--muted)", border: `1px solid ${mode === "roll" ? "var(--gold)" : "var(--border)"}` }}>
+              Roll
             </button>
           </div>
         )}
 
         <div className="field" style={{ marginBottom: 14 }}>
-          <div className="field-label">{mode === "assign" ? "Fecha de asignación" : "Fecha de cierre"}</div>
+          <div className="field-label">{mode === "assign" ? "Fecha de asignación" : mode === "roll" ? "Fecha del roll" : "Fecha de cierre"}</div>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </div>
 
@@ -965,13 +1079,36 @@ function CloseModal({ trade, onCancel, onSave, onAssign }) {
             <div style={{ background: "var(--panel2)", border: "1px solid var(--border)", borderRadius: 6, padding: 12, fontSize: 13, marginBottom: 14, color: "var(--muted)" }}>
               Esto registrará automáticamente una <strong style={{ color: "var(--text)" }}>{preview.action === "buy" ? "compra" : "venta"}</strong> de{" "}
               <strong style={{ color: "var(--text)" }}>{preview.shares} acciones</strong> de {trade.ticker} a un precio efectivo de{" "}
-              <strong style={{ color: "var(--text)" }}>{fmt(preview.price)}</strong> por acción (ya incluye la prima y comisión de esta opción).
+              <strong style={{ color: "var(--text)" }}>{fmt(preview.price)}</strong> por acción (incluye toda la prima neta cobrada/pagada en esta cadena, más comisiones).
             </div>
-            <button
-              className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
-              onClick={() => onAssign(date)}
-            >
+            <button className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 8 }} onClick={() => onAssign(date)}>
               Confirmar asignación / ejercicio
+            </button>
+          </>
+        )}
+
+        {mode === "roll" && originalLeg && (
+          <>
+            <div className="field-label" style={{ marginBottom: 8 }}>Cerrar el tramo actual</div>
+            <div className="form-grid" style={{ marginBottom: 14 }}>
+              <div className="field"><div className="field-label">{legLabel(originalLeg)} — precio de recompra/cierre</div><input type="number" value={rollClosePrice} onChange={(e) => setRollClosePrice(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Comisión de cierre ($, opcional)</div><input type="number" value={rollCloseCommission} onChange={(e) => setRollCloseCommission(e.target.value)} placeholder="0.00" /></div>
+            </div>
+
+            <div className="field-label" style={{ marginBottom: 8 }}>Abrir el nuevo tramo</div>
+            <div className="form-grid">
+              <div className="field"><div className="field-label">Nuevo vencimiento</div><input type="date" value={newExpiration} onChange={(e) => setNewExpiration(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Nuevo strike</div><input type="number" value={newStrike} onChange={(e) => setNewStrike(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Nueva prima ($/contrato)</div><input type="number" value={newPrice} onChange={(e) => setNewPrice(e.target.value)} /></div>
+              <div className="field"><div className="field-label">Comisión de apertura ($, opcional)</div><input type="number" value={newCommission} onChange={(e) => setNewCommission(e.target.value)} placeholder="0.00" /></div>
+            </div>
+
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 12, marginBottom: 4 }}>
+              El nuevo tramo mantiene la misma dirección ({originalLeg.action === "sell" ? "venta" : "compra"} de {originalLeg.optionType === "put" ? "put" : "call"}) y sigue acumulando la prima de toda la cadena para cuando finalmente cierres o te asignen.
+            </div>
+
+            <button className="btn btn-gain" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={submitRoll}>
+              Confirmar roll
             </button>
           </>
         )}
