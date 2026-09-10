@@ -167,6 +167,16 @@ function tradeLabel(t) {
   if (legs.length <= 1) return legs[0] ? legLabel(legs[0]) : "Opción";
   return `Spread (${legs.length} patas)`;
 }
+// Clasifica una opción de una sola pata en una estrategia reconocible; los spreads van aparte.
+function optionStrategy(t) {
+  const legs = t.legs || [];
+  if (legs.length !== 1) return "Spreads";
+  const l = legs[0];
+  if (l.action === "sell" && l.optionType === "put") return "Cash Secured Put";
+  if (l.action === "sell" && l.optionType === "call") return "Covered Call";
+  if (l.action === "buy" && l.optionType === "call") return "Call comprada";
+  return "Put comprada";
+}
 // P&L no realizado de una opción abierta, usando precios de mercado (occSymbol -> precio) si están disponibles
 function unrealizedOptionPnL(t, markPrices) {
   if (t.status === "closed" || t.status === "assigned" || t.status === "rolled") return null;
@@ -642,6 +652,18 @@ export default function Dashboard({ session }) {
     ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
     ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: unrealizedOptionPnL(t, markPrices) != null ? fx(unrealizedOptionPnL(t, markPrices), t.currency) : null })),
   ];
+
+  // ---------- opciones abiertas agrupadas por estrategia (para el Portafolio) ----------
+  const openOptionsByStrategy = useMemo(() => {
+    const groups = {};
+    const order = ["Cash Secured Put", "Covered Call", "Call comprada", "Put comprada", "Spreads"];
+    for (const t of openOptions) {
+      const key = optionStrategy(t);
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(t);
+    }
+    return order.filter((k) => groups[k]).map((k) => ({ strategy: k, trades: groups[k] }));
+  }, [openOptions]);
 
   // ---------- cuenta de efectivo ----------
   const netDeposits = cashTx.reduce((s, c) => s + fx(c.type === "deposit" ? c.amount : -c.amount, c.currency), 0);
@@ -1132,6 +1154,7 @@ export default function Dashboard({ session }) {
         )}
 
         {view === "portfolio" && (
+        <>
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Portafolio — acciones y ETFs</div>
@@ -1176,6 +1199,53 @@ export default function Dashboard({ session }) {
             </div>
           )}
         </div>
+
+        <div className="panel">
+          <div className="panel-head"><div className="panel-title">Opciones abiertas — por estrategia</div></div>
+          {openOptions.length === 0 ? <div className="empty">Sin opciones abiertas</div> : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              {openOptionsByStrategy.map((group) => {
+                const groupTotal = group.trades.reduce((s, t) => {
+                  const u = unrealizedOptionPnL(t, markPrices);
+                  return s + (u != null ? fx(u, t.currency) : 0);
+                }, 0);
+                return (
+                  <div key={group.strategy}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{group.strategy} <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 12 }}>({group.trades.length})</span></div>
+                      <div className="mono" style={{ fontSize: 13, color: groupTotal >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(groupTotal)}</div>
+                    </div>
+                    <div className="table-wrap">
+                      <table>
+                        <thead><tr><th>Ticker</th><th>Divisa</th><th>Detalle</th><th>Vencimiento</th><th>Prima</th><th>P&L no realiz.</th></tr></thead>
+                        <tbody>
+                          {group.trades.map((t) => {
+                            const u = unrealizedOptionPnL(t, markPrices);
+                            const daysLeft = t.expiration ? Math.ceil((new Date(t.expiration) - new Date()) / 86400000) : null;
+                            return (
+                              <tr key={t.id}>
+                                <td style={{ fontWeight: 500 }}>{t.ticker}</td>
+                                <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{t.currency || "USD"}</td>
+                                <td style={{ fontSize: 13 }}>{tradeLabel(t)} <span className="mono" style={{ color: "var(--muted)" }}>× {t.qty}</span></td>
+                                <td className="mono" style={{ fontSize: 12 }}>
+                                  {t.expiration || "—"}
+                                  {daysLeft != null && <span style={{ color: daysLeft < 0 ? "var(--loss)" : "var(--muted)", marginLeft: 6 }}>({daysLeft < 0 ? "vencida" : `${daysLeft}d`})</span>}
+                                </td>
+                                <td className="mono">{fmtCur((t.legs || []).reduce((s, l) => s + l.price, 0), t.currency)}</td>
+                                <td className="mono" style={{ color: u == null ? "var(--muted)" : u >= 0 ? "var(--gain)" : "var(--loss)" }}>{u == null ? "—" : fmtCur(u, t.currency)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        </>
         )}
 
         {view === "trades" && (
