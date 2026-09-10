@@ -230,6 +230,7 @@ export default function Dashboard({ session }) {
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
   const [period, setPeriod] = useState("mtd");
+  const [dashboardPeriod, setDashboardPeriod] = useState("all");
   const [refreshing, setRefreshing] = useState(false);
   const [markPrices, setMarkPrices] = useState({});
   const [view, setView] = useState("dashboard"); // "dashboard" | "portfolio" | "cash" | "trades"
@@ -674,6 +675,20 @@ export default function Dashboard({ session }) {
   ];
   const activePeriod = PERIODS.find((p) => p.id === period) || PERIODS[1];
 
+  // Marco temporal específico para el gráfico del Dashboard: semana/mes/año en curso, año natural, todo.
+  const DASHBOARD_PERIODS = [
+    { id: "1w", label: "Semana" },
+    { id: "mtd", label: "Mes" },
+    { id: "ytd", label: "Año en curso" },
+    { id: "1y", label: "Año natural" },
+    { id: "all", label: "Todo" },
+  ].map((p) => ({ ...p, start: PERIODS.find((full) => full.id === p.id).start }));
+  const activeDashboardPeriod = DASHBOARD_PERIODS.find((p) => p.id === dashboardPeriod) || DASHBOARD_PERIODS[4];
+  const dashboardChartData = useMemo(
+    () => chartData.filter((pt) => pt.date >= activeDashboardPeriod.start),
+    [chartData, activeDashboardPeriod.start]
+  );
+
   const realizedNow = valueAsOf(realizedPoints, todayStr, "acumulado");
   const realizedAtStart = valueAsOf(realizedPoints, activePeriod.start, "acumulado");
   const periodResult = realizedNow - realizedAtStart;
@@ -940,34 +955,46 @@ export default function Dashboard({ session }) {
 
         {view === "dashboard" && (
         <>
-        <div className="grid-2">
-          <div className="panel">
-            <div className="panel-head"><div className="panel-title">Curva de P&L acumulado</div></div>
-            {chartData.length === 0 ? <div className="empty">Sin trades cerrados aún</div> : (
-              <ResponsiveContainer width="100%" height={220}>
-                <LineChart data={chartData}>
-                  <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="i" tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
-                  <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
-                  <ReferenceLine y={0} stroke="#20304C" />
-                  <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "Acumulado"]} labelFormatter={(_, p) => p?.[0]?.payload?.date || ""} />
-                  <Line type="monotone" dataKey="acumulado" stroke="#E8A33D" strokeWidth={2} dot={{ r: 3, fill: "#E8A33D" }} />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Curva de P&L acumulado</div>
+            <div className="tabs">
+              {DASHBOARD_PERIODS.map((p) => (
+                <button key={p.id} className={`tab ${dashboardPeriod === p.id ? "active" : ""}`} onClick={() => setDashboardPeriod(p.id)}>{p.label}</button>
+              ))}
+            </div>
           </div>
+          {dashboardChartData.length === 0 ? <div className="empty">Sin trades cerrados en este periodo</div> : (
+            <ResponsiveContainer width="100%" height={360}>
+              <LineChart data={dashboardChartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} minTickGap={40} />
+                <YAxis tick={{ fill: "#7E8CA6", fontSize: 12 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={64} />
+                <ReferenceLine y={0} stroke="#20304C" />
+                <Tooltip
+                  contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 8, fontSize: 13, padding: "8px 12px" }}
+                  labelStyle={{ color: "var(--gold)", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}
+                  itemStyle={{ color: "var(--text)" }}
+                  formatter={(v) => [fmt(v), "Acumulado"]}
+                  labelFormatter={(label) => label}
+                />
+                <Line type="monotone" dataKey="acumulado" stroke="#E8A33D" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: "#E8A33D" }} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
 
-          <div className="panel">
-            <div className="panel-head"><div className="panel-title">P&L por ticker</div></div>
-            {byTickerChart.length === 0 ? <div className="empty">Sin trades cerrados aún</div> : (
-              <div className="cards">
-                {byTickerChart.map((d) => {
-                  const parts = [];
-                  if (d.stockN > 0) parts.push(`${d.stockN} acción${d.stockN > 1 ? "es" : ""}`);
-                  if (d.optN > 0) parts.push(`${d.optN} opción${d.optN > 1 ? "es" : ""}`);
-                  if (d.divN > 0) parts.push(`${d.divN} dividendo${d.divN > 1 ? "s" : ""}`);
-                  return (
-                    <div className="card" key={d.ticker}>
+        <div className="panel">
+          <div className="panel-head"><div className="panel-title">P&L por ticker</div></div>
+          {byTickerChart.length === 0 ? <div className="empty">Sin trades cerrados aún</div> : (
+            <div className="cards">
+              {byTickerChart.map((d) => {
+                const parts = [];
+                if (d.stockN > 0) parts.push(`${d.stockN} acción${d.stockN > 1 ? "es" : ""}`);
+                if (d.optN > 0) parts.push(`${d.optN} opción${d.optN > 1 ? "es" : ""}`);
+                if (d.divN > 0) parts.push(`${d.divN} dividendo${d.divN > 1 ? "s" : ""}`);
+                return (
+                  <div className="card" key={d.ticker}>
                       <div className="card-label">{d.ticker}</div>
                       <div className="card-value" style={{ color: d.pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(d.pnl)}</div>
                       <div className="card-sub">{parts.join(" · ")}</div>
@@ -977,7 +1004,6 @@ export default function Dashboard({ session }) {
               </div>
             )}
           </div>
-        </div>
 
         <div className="panel">
           <div className="panel-head">
