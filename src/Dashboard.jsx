@@ -1032,12 +1032,12 @@ export default function Dashboard({ session }) {
         {view === "byticker" && (
         <div className="panel">
           <div className="panel-head">
-            <div className="panel-title">Precio medio ajustado por ticker</div>
+            <div className="panel-title">Precio medio ajustado por ticker (acciones y ETFs)</div>
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones cerradas y los dividendos cobrados sobre las acciones que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. El % de rendimiento total suma todo: valorización + primas + dividendos, sobre lo que invertiste.
+            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones cerradas y los dividendos cobrados sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. El % de rendimiento total suma todo: valorización + primas + dividendos, sobre lo que invertiste.
           </div>
-          {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones en portafolio</div> : (
+          {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
               <table>
                 <thead>
@@ -1071,14 +1071,14 @@ export default function Dashboard({ session }) {
         {view === "portfolio" && (
         <div className="panel">
           <div className="panel-head">
-            <div className="panel-title">Portafolio — acciones</div>
+            <div className="panel-title">Portafolio — acciones y ETFs</div>
             {openPositions.length > 0 && (
               <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 13 }} disabled={refreshing} onClick={() => refreshPrices(openPositions.map((p) => p.ticker))}>
                 {refreshing ? "Actualizando…" : "Actualizar precios"}
               </button>
             )}
           </div>
-          {openPositions.length === 0 ? <div className="empty">Sin acciones en portafolio</div> : (
+          {openPositions.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Ticker</th><th>Acciones</th><th>$ Prom.</th><th>$ Actual</th><th>$ Mercado</th><th>P&L no realiz.</th><th>%</th></tr></thead>
@@ -1279,13 +1279,13 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency }) {
         <div className="type-toggle">
           {["stock", "option"].map((k) => (
             <button key={k} onClick={() => setType(k)} style={{ background: type === k ? "var(--gold)" : "transparent", color: type === k ? "#1A1300" : "var(--muted)", border: `1px solid ${type === k ? "var(--gold)" : "var(--border)"}` }}>
-              {k === "stock" ? "Acción" : "Opción / Spread"}
+              {k === "stock" ? "Acción / ETF" : "Opción / Spread"}
             </button>
           ))}
         </div>
 
         <div className="form-grid">
-          <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL" /></div>
+          <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL, SPY..." /></div>
           <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
           <div className="field"><div className="field-label">Divisa</div>
             <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
@@ -1398,7 +1398,7 @@ function AddDividendModal({ onCancel, onSave, defaultCurrency }) {
         <div className="modal-head"><div className="modal-title">Registrar dividendo</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
 
         <div className="form-grid">
-          <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL" /></div>
+          <div className="field"><div className="field-label">Ticker</div><input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="AAPL, SPY..." /></div>
           <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
           <div className="field"><div className="field-label">Divisa</div>
             <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
