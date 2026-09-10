@@ -15,11 +15,24 @@ export const CURRENCIES = [
 // así fmt()/fmtCompact() usan siempre el símbolo correcto en cualquier parte del archivo.
 let ACTIVE_SYMBOL = "$";
 function currencySymbol(code) { return CURRENCIES.find((c) => c.code === code)?.symbol || "$"; }
+// Convierte un importe de una divisa a otra usando tasas con base = toCur (rates[fromCur] = cuántas
+// unidades de fromCur equivalen a 1 toCur). Si no hay tasa disponible, devuelve el importe sin convertir.
+function convert(amount, fromCur, toCur, rates) {
+  if (!amount) return 0;
+  if (!fromCur || fromCur === toCur) return amount;
+  if (!rates || rates[fromCur] == null) return amount;
+  return amount / rates[fromCur];
+}
 
 const fmt = (n) =>
   (n < 0 ? `-${ACTIVE_SYMBOL}` : ACTIVE_SYMBOL) + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtCompact = (n) =>
   (n < 0 ? `-${ACTIVE_SYMBOL}` : ACTIVE_SYMBOL) + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
+// Para celdas de tabla que muestran un importe en SU PROPIA divisa (no la divisa de totales activa)
+const fmtCur = (n, curCode) => {
+  const sym = currencySymbol(curCode);
+  return (n < 0 ? `-${sym}` : sym) + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
@@ -235,7 +248,7 @@ export default function Dashboard({ session }) {
   const [markPrices, setMarkPrices] = useState({});
   const [view, setView] = useState("dashboard"); // "dashboard" | "portfolio" | "cash" | "trades"
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [currency, setCurrency] = useState("USD");
+  const [currency, setCurrency] = useState("EUR"); // divisa de los TOTALES combinados (no filtra las tablas)
   const [fxRates, setFxRates] = useState(null); // { USD: 1, EUR: 0.92, GBP: 0.78 } relativas a `currency`
   const [fxLoading, setFxLoading] = useState(false);
   const [fxError, setFxError] = useState("");
@@ -503,15 +516,13 @@ export default function Dashboard({ session }) {
   }
 
   // ---------- derived ----------
-  // tradesById usa TODOS los trades (sin filtrar) para poder resolver cadenas de roll aunque
-  // el eslabón anterior perteneciera a otra vista; el resto de cálculos sí se filtra por divisa.
+  // Ya NO se filtra por divisa: se muestran TODOS los trades juntos. Las sumas que combinan
+  // divisas distintas se convierten a `currency` (la divisa de totales) con el tipo de cambio del día.
   const tradesById = useMemo(() => Object.fromEntries(trades.map((t) => [t.id, t])), [trades]);
-  const currencyTrades = useMemo(() => trades.filter((t) => (t.currency || "USD") === currency), [trades, currency]);
-  const currencyCashTx = useMemo(() => cashTx.filter((c) => (c.currency || "USD") === currency), [cashTx, currency]);
-  const currencyDividends = useMemo(() => dividends.filter((d) => (d.currency || "USD") === currency), [dividends, currency]);
+  function fx(amount, fromCur) { return convert(amount, fromCur, currency, fxRates); }
 
-  const stockTrades = useMemo(() => currencyTrades.filter((t) => t.type === "stock"), [currencyTrades]);
-  const optionTrades = useMemo(() => currencyTrades.filter((t) => t.type === "option"), [currencyTrades]);
+  const stockTrades = useMemo(() => trades.filter((t) => t.type === "stock"), [trades]);
+  const optionTrades = useMemo(() => trades.filter((t) => t.type === "option"), [trades]);
 
   // ---------- patrimonio total (todas las divisas convertidas a la activa) ----------
   const combinedTotal = useMemo(() => {
@@ -535,7 +546,7 @@ export default function Dashboard({ session }) {
     const sorted = [...stockTrades].sort((a, b) => new Date(a.date) - new Date(b.date));
     for (const t of sorted) {
       const tk = t.ticker;
-      if (!byTicker[tk]) byTicker[tk] = { ticker: tk, shares: 0, avgCost: 0, totalCost: 0, realized: 0 };
+      if (!byTicker[tk]) byTicker[tk] = { ticker: tk, shares: 0, avgCost: 0, totalCost: 0, realized: 0, currency: t.currency || "USD" };
       const p = byTicker[tk];
       if (t.action === "buy") {
         p.totalCost += t.qty * t.price + (t.commission || 0);
@@ -555,9 +566,9 @@ export default function Dashboard({ session }) {
   }, [stockTrades]);
 
   const openPositions = positions.filter((p) => p.shares > 0);
-  const totalMarketValue = openPositions.reduce((s, p) => s + (prices[p.ticker] ?? p.avgCost) * p.shares, 0);
-  const stockRealized = positions.reduce((s, p) => s + p.realized, 0);
-  const stockUnrealized = openPositions.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
+  const totalMarketValue = openPositions.reduce((s, p) => s + fx((prices[p.ticker] ?? p.avgCost) * p.shares, p.currency), 0);
+  const stockRealized = positions.reduce((s, p) => s + fx(p.realized, p.currency), 0);
+  const stockUnrealized = openPositions.reduce((s, p) => s + fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency), 0);
 
   const closedOptions = optionTrades.filter((t) => t.status === "closed");
   const assignedOptions = optionTrades.filter((t) => t.status === "assigned");
@@ -565,10 +576,10 @@ export default function Dashboard({ session }) {
   // ganancia propia (ver optionPnL), no se oculta dentro del precio del trade de acciones.
   const realizedOptions = [...closedOptions, ...assignedOptions];
   const openOptions = optionTrades.filter((t) => t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled");
-  const optionRealized = realizedOptions.reduce((s, t) => s + optionPnL(t, tradesById), 0);
-  const optionUnrealized = openOptions.reduce((s, t) => s + (unrealizedOptionPnL(t, markPrices) || 0), 0);
+  const optionRealized = realizedOptions.reduce((s, t) => s + fx(optionPnL(t, tradesById), t.currency), 0);
+  const optionUnrealized = openOptions.reduce((s, t) => s + fx(unrealizedOptionPnL(t, markPrices) || 0, t.currency), 0);
 
-  const dividendsTotal = currencyDividends.reduce((s, d) => s + d.amount, 0);
+  const dividendsTotal = dividends.reduce((s, d) => s + fx(d.amount, d.currency), 0);
   const realizedTotal = stockRealized + optionRealized + dividendsTotal;
   const unrealizedTotal = stockUnrealized + optionUnrealized;
   const totalPnL = realizedTotal + unrealizedTotal;
@@ -580,39 +591,40 @@ export default function Dashboard({ session }) {
 
   const chartData = useMemo(() => {
     const events = [];
-    for (const t of closedSells) events.push({ date: t.date, pnl: sellPnlById[t.id] ?? 0 });
-    for (const t of realizedOptions) events.push({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) });
-    for (const d of currencyDividends) events.push({ date: d.date, pnl: d.amount });
+    for (const t of closedSells) events.push({ date: t.date, pnl: convert(sellPnlById[t.id] ?? 0, t.currency, currency, fxRates) });
+    for (const t of realizedOptions) events.push({ date: t.closeDate || t.date, pnl: convert(optionPnL(t, tradesById), t.currency, currency, fxRates) });
+    for (const d of dividends) events.push({ date: d.date, pnl: convert(d.amount, d.currency, currency, fxRates) });
     events.sort((a, b) => new Date(a.date) - new Date(b.date));
     let acc = 0;
     return events.map((e, i) => { acc += e.pnl; return { i: i + 1, date: e.date, acumulado: Math.round(acc * 100) / 100 }; });
-  }, [closedSells, realizedOptions, sellPnlById, tradesById, currencyDividends]);
+  }, [closedSells, realizedOptions, sellPnlById, tradesById, dividends, currency, fxRates]);
 
   const byTickerChart = useMemo(() => {
     const map = {};
-    function bump(ticker, pnl, kind) {
-      if (!map[ticker]) map[ticker] = { pnl: 0, stockN: 0, optN: 0, divN: 0 };
+    function bump(ticker, pnl, kind, cur) {
+      if (!map[ticker]) map[ticker] = { pnl: 0, stockN: 0, optN: 0, divN: 0, currency: cur };
       map[ticker].pnl += pnl;
       if (kind === "stock") map[ticker].stockN += 1;
       else if (kind === "option") map[ticker].optN += 1;
       else map[ticker].divN += 1;
     }
-    for (const t of closedSells) bump(t.ticker, sellPnlById[t.id] ?? 0, "stock");
-    for (const t of realizedOptions) bump(t.ticker, optionPnL(t, tradesById), "option");
-    for (const d of currencyDividends) bump(d.ticker, d.amount, "dividend");
+    for (const t of closedSells) bump(t.ticker, sellPnlById[t.id] ?? 0, "stock", t.currency);
+    for (const t of realizedOptions) bump(t.ticker, optionPnL(t, tradesById), "option", t.currency);
+    for (const d of dividends) bump(d.ticker, d.amount, "dividend", d.currency);
     return Object.entries(map)
-      .map(([ticker, v]) => ({ ticker, pnl: Math.round(v.pnl * 100) / 100, stockN: v.stockN, optN: v.optN, divN: v.divN }))
+      .map(([ticker, v]) => ({ ticker, pnl: Math.round(v.pnl * 100) / 100, stockN: v.stockN, optN: v.optN, divN: v.divN, currency: v.currency }))
       .sort((a, b) => b.pnl - a.pnl);
-  }, [closedSells, realizedOptions, sellPnlById, tradesById, currencyDividends]);
+  }, [closedSells, realizedOptions, sellPnlById, tradesById, dividends]);
 
-  // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que a\u00fan tienes) ----------
-  // Se excluye a prop\u00f3sito el P&L de ventas parciales de acciones: eso ya es una realizaci\u00f3n aparte,
-  // no un ingreso extra que deba \"rebajar\" el costo de las acciones que sigues teniendo.
+  // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que aún tienes) ----------
+  // Se excluye a propósito el P&L de ventas parciales de acciones: eso ya es una realización aparte,
+  // no un ingreso extra que deba "rebajar" el costo de las acciones que sigues teniendo. Los importes
+  // quedan en la divisa nativa del ticker (no se combinan entre sí).
   const tickerAdjusted = useMemo(() => {
     const optMap = {};
     const divMap = {};
     for (const t of realizedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
-    for (const d of currencyDividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
+    for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
       const optIncome = optMap[p.ticker] || 0;
       const divIncome = divMap[p.ticker] || 0;
@@ -622,26 +634,30 @@ export default function Dashboard({ session }) {
       const costBasis = p.avgCost * p.shares;
       const pctRecovered = costBasis > 0 ? (totalIncome / costBasis) * 100 : null;
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
-      return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct };
+      return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, realizedOptions, currencyDividends, tradesById, prices]);
+  }, [openPositions, realizedOptions, dividends, tradesById, prices]);
 
   const tickerTape = [
-    ...openPositions.map((p) => ({ label: p.ticker, val: ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares })),
-    ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: unrealizedOptionPnL(t, markPrices) })),
+    ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
+    ...openOptions.map((t) => ({ label: `${t.ticker} · ${tradeLabel(t)}`, val: unrealizedOptionPnL(t, markPrices) != null ? fx(unrealizedOptionPnL(t, markPrices), t.currency) : null })),
   ];
 
   // ---------- cuenta de efectivo ----------
-  const netDeposits = currencyCashTx.reduce((s, c) => s + (c.type === "deposit" ? c.amount : -c.amount), 0);
+  const netDeposits = cashTx.reduce((s, c) => s + fx(c.type === "deposit" ? c.amount : -c.amount, c.currency), 0);
   const accountValue = netDeposits + totalPnL;
   const totalReturnPct = netDeposits > 0 ? (totalPnL / netDeposits) * 100 : null;
 
-  // serie de depósitos netos acumulados en el tiempo, para saber el capital aportado "a fecha de"
+  // serie de depósitos netos acumulados en el tiempo (convertidos a la divisa de totales), para
+  // saber el capital aportado "a fecha de"
   const capitalPoints = useMemo(() => {
-    const sorted = [...currencyCashTx].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const sorted = [...cashTx].sort((a, b) => new Date(a.date) - new Date(b.date));
     let acc = 0;
-    return sorted.map((c) => { acc += c.type === "deposit" ? c.amount : -c.amount; return { date: c.date, value: acc }; });
-  }, [currencyCashTx]);
+    return sorted.map((c) => {
+      acc += convert(c.type === "deposit" ? c.amount : -c.amount, c.currency, currency, fxRates);
+      return { date: c.date, value: acc };
+    });
+  }, [cashTx, currency, fxRates]);
 
   // serie de P&L realizado acumulado en el tiempo (reutiliza los mismos eventos que chartData)
   const realizedPoints = chartData; // [{date, acumulado}]
@@ -662,7 +678,7 @@ export default function Dashboard({ session }) {
   function isoMonthsAgo(n) { const d = new Date(today); d.setMonth(d.getMonth() - n); return d.toISOString().slice(0, 10); }
   function firstOfMonth() { return new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10); }
   function firstOfYear() { return new Date(today.getFullYear(), 0, 1).toISOString().slice(0, 10); }
-  const earliestDate = [...currencyCashTx.map((c) => c.date), ...currencyTrades.map((t) => t.date)].sort()[0] || todayStr;
+  const earliestDate = [...cashTx.map((c) => c.date), ...trades.map((t) => t.date)].sort()[0] || todayStr;
 
   const PERIODS = [
     { id: "1w", label: "1S", start: isoDaysAgo(7) },
@@ -695,7 +711,7 @@ export default function Dashboard({ session }) {
   const capitalAtStart = valueAsOf(capitalPoints, activePeriod.start, "value");
   const periodReturnPct = capitalAtStart > 0 ? (periodResult / capitalAtStart) * 100 : null;
 
-  const depositsInPeriod = currencyCashTx.filter((c) => c.date >= activePeriod.start && c.date <= todayStr);
+  const depositsInPeriod = cashTx.filter((c) => c.date >= activePeriod.start && c.date <= todayStr);
 
   // ---------- plusvalías por categoría (acciones / opciones / dividendos) ----------
   const [gainsPeriod, setGainsPeriod] = useState("ytd");
@@ -707,16 +723,16 @@ export default function Dashboard({ session }) {
     return sorted.map((e) => { acc += e.pnl; return { date: e.date, acumulado: acc }; });
   }
   const stockPnlPoints = useMemo(
-    () => cumulativePoints(closedSells.map((t) => ({ date: t.date, pnl: sellPnlById[t.id] ?? 0 }))),
-    [closedSells, sellPnlById]
+    () => cumulativePoints(closedSells.map((t) => ({ date: t.date, pnl: convert(sellPnlById[t.id] ?? 0, t.currency, currency, fxRates) }))),
+    [closedSells, sellPnlById, currency, fxRates]
   );
   const optionPnlPoints = useMemo(
-    () => cumulativePoints(realizedOptions.map((t) => ({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) }))),
-    [realizedOptions, tradesById]
+    () => cumulativePoints(realizedOptions.map((t) => ({ date: t.closeDate || t.date, pnl: convert(optionPnL(t, tradesById), t.currency, currency, fxRates) }))),
+    [realizedOptions, tradesById, currency, fxRates]
   );
   const dividendPnlPoints = useMemo(
-    () => cumulativePoints(currencyDividends.map((d) => ({ date: d.date, pnl: d.amount }))),
-    [currencyDividends]
+    () => cumulativePoints(dividends.map((d) => ({ date: d.date, pnl: convert(d.amount, d.currency, currency, fxRates) }))),
+    [dividends, currency, fxRates]
   );
 
   function periodDelta(points) {
@@ -731,7 +747,7 @@ export default function Dashboard({ session }) {
   const gainsStocksCount = closedSells.filter((t) => inActiveGainsPeriod(t.date)).length;
   const gainsOptionsClosedCount = realizedOptions.filter((t) => t.status === "closed" && inActiveGainsPeriod(t.closeDate || t.date)).length;
   const gainsOptionsAssignedCount = realizedOptions.filter((t) => t.status === "assigned" && inActiveGainsPeriod(t.closeDate || t.date)).length;
-  const gainsDividendsCount = currencyDividends.filter((d) => inActiveGainsPeriod(d.date)).length;
+  const gainsDividendsCount = dividends.filter((d) => inActiveGainsPeriod(d.date)).length;
 
   // serie combinada de valor de cuenta (capital aportado + P&L realizado) para la gráfica
   const accountValueChart = useMemo(() => {
@@ -773,7 +789,7 @@ export default function Dashboard({ session }) {
           </div>
         </div>
         <div className="top-actions">
-          <div className="tabs">
+          <div className="tabs" title="Divisa de los totales combinados (no oculta nada, todo se sigue viendo junto)">
             {CURRENCIES.map((c) => (
               <button key={c.code} className={`tab ${currency === c.code ? "active" : ""}`} onClick={() => setCurrency(c.code)}>{c.code}</button>
             ))}
@@ -931,16 +947,17 @@ export default function Dashboard({ session }) {
 
           <div style={{ marginTop: 16 }}>
             <div className="field-label" style={{ marginBottom: 8 }}>Movimientos de efectivo</div>
-            {currencyCashTx.length === 0 ? <div className="empty">Sin movimientos aún</div> : (
+            {cashTx.length === 0 ? <div className="empty">Sin movimientos aún</div> : (
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Fecha</th><th>Tipo</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
+                  <thead><tr><th>Fecha</th><th>Tipo</th><th>Divisa</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
                   <tbody>
-                    {[...currencyCashTx].sort((a, b) => new Date(b.date) - new Date(a.date)).map((c) => (
+                    {[...cashTx].sort((a, b) => new Date(b.date) - new Date(a.date)).map((c) => (
                       <tr key={c.id}>
                         <td className="mono" style={{ fontSize: 12 }}>{c.date}</td>
                         <td><span className={`badge ${c.type === "deposit" ? "badge-closed" : "badge-open"}`}>{c.type === "deposit" ? "Depósito" : "Retiro"}</span></td>
-                        <td className="mono" style={{ color: c.type === "deposit" ? "var(--gain)" : "var(--loss)" }}>{c.type === "deposit" ? "+" : "-"}{fmt(c.amount)}</td>
+                        <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{c.currency || "USD"}</td>
+                        <td className="mono" style={{ color: c.type === "deposit" ? "var(--gain)" : "var(--loss)" }}>{c.type === "deposit" ? "+" : "-"}{fmtCur(c.amount, c.currency)}</td>
                         <td style={{ fontSize: 13, color: "var(--muted)" }}>{c.notes || "—"}</td>
                         <td><button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => deleteCashTx(c.id)}><Trash2 size={15} /></button></td>
                       </tr>
@@ -996,7 +1013,7 @@ export default function Dashboard({ session }) {
                 return (
                   <div className="card" key={d.ticker}>
                       <div className="card-label">{d.ticker}</div>
-                      <div className="card-value" style={{ color: d.pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(d.pnl)}</div>
+                      <div className="card-value" style={{ color: d.pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmtCur(d.pnl, d.currency)}</div>
                       <div className="card-sub">{parts.join(" · ")}</div>
                     </div>
                   );
@@ -1013,18 +1030,19 @@ export default function Dashboard({ session }) {
           <div className="card" style={{ marginBottom: 16, maxWidth: 220 }}>
             <div className="card-label">Total dividendos</div>
             <div className="card-value" style={{ color: dividendsTotal > 0 ? "var(--gain)" : "var(--muted)" }}>{fmt(dividendsTotal)}</div>
-            <div className="card-sub">{currencyDividends.length} registrados</div>
+            <div className="card-sub">{dividends.length} registrados</div>
           </div>
-          {currencyDividends.length === 0 ? <div className="empty">Sin dividendos registrados aún</div> : (
+          {dividends.length === 0 ? <div className="empty">Sin dividendos registrados aún</div> : (
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Fecha</th><th>Ticker</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
+                <thead><tr><th>Fecha</th><th>Ticker</th><th>Divisa</th><th>Monto</th><th>Notas</th><th></th></tr></thead>
                 <tbody>
-                  {[...currencyDividends].sort((a, b) => new Date(b.date) - new Date(a.date)).map((d) => (
+                  {[...dividends].sort((a, b) => new Date(b.date) - new Date(a.date)).map((d) => (
                     <tr key={d.id}>
                       <td className="mono" style={{ fontSize: 12 }}>{d.date}</td>
                       <td style={{ fontWeight: 500 }}>{d.ticker}</td>
-                      <td className="mono" style={{ color: "var(--gain)" }}>{fmt(d.amount)}</td>
+                      <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{d.currency || "USD"}</td>
+                      <td className="mono" style={{ color: "var(--gain)" }}>{fmtCur(d.amount, d.currency)}</td>
                       <td style={{ fontSize: 13, color: "var(--muted)" }}>{d.notes || "—"}</td>
                       <td><button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => deleteDividend(d.id)}><Trash2 size={15} /></button></td>
                     </tr>
@@ -1086,7 +1104,7 @@ export default function Dashboard({ session }) {
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th><th>Acciones</th><th>$ Compra</th><th>+ Primas</th><th>+ Dividendos</th>
+                    <th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Compra</th><th>+ Primas</th><th>+ Dividendos</th>
                     <th>$ Ajustado</th><th>% Recuperado</th><th>% Rendimiento total</th>
                   </tr>
                 </thead>
@@ -1094,11 +1112,12 @@ export default function Dashboard({ session }) {
                   {tickerAdjusted.map((r) => (
                     <tr key={r.ticker}>
                       <td style={{ fontWeight: 500 }}>{r.ticker}</td>
+                      <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{r.currency || "USD"}</td>
                       <td className="mono">{r.shares}</td>
-                      <td className="mono">{fmt(r.avgCost)}</td>
-                      <td className="mono" style={{ color: r.optIncome === 0 ? "var(--muted)" : r.optIncome > 0 ? "var(--gain)" : "var(--loss)" }}>{r.optIncome === 0 ? "—" : fmt(r.optIncome)}</td>
-                      <td className="mono" style={{ color: r.divIncome === 0 ? "var(--muted)" : "var(--gain)" }}>{r.divIncome === 0 ? "—" : fmt(r.divIncome)}</td>
-                      <td className="mono" style={{ fontWeight: 600 }}>{fmt(r.adjustedAvg)}</td>
+                      <td className="mono">{fmtCur(r.avgCost, r.currency)}</td>
+                      <td className="mono" style={{ color: r.optIncome === 0 ? "var(--muted)" : r.optIncome > 0 ? "var(--gain)" : "var(--loss)" }}>{r.optIncome === 0 ? "—" : fmtCur(r.optIncome, r.currency)}</td>
+                      <td className="mono" style={{ color: r.divIncome === 0 ? "var(--muted)" : "var(--gain)" }}>{r.divIncome === 0 ? "—" : fmtCur(r.divIncome, r.currency)}</td>
+                      <td className="mono" style={{ fontWeight: 600 }}>{fmtCur(r.adjustedAvg, r.currency)}</td>
                       <td className="mono" style={{ color: "var(--gold)" }}>{r.pctRecovered == null ? "—" : `${r.pctRecovered.toFixed(1)}%`}</td>
                       <td className="mono" style={{ color: r.totalReturnPct == null ? "var(--muted)" : r.totalReturnPct >= 0 ? "var(--gain)" : "var(--loss)" }}>
                         {r.totalReturnPct == null ? "—" : `${r.totalReturnPct >= 0 ? "+" : ""}${r.totalReturnPct.toFixed(1)}%`}
@@ -1125,7 +1144,7 @@ export default function Dashboard({ session }) {
           {openPositions.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Ticker</th><th>Acciones</th><th>$ Prom.</th><th>$ Actual</th><th>$ Mercado</th><th>P&L no realiz.</th><th>%</th></tr></thead>
+                <thead><tr><th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Prom.</th><th>$ Actual</th><th>$ Mercado</th><th>P&L no realiz.</th><th>%</th></tr></thead>
                 <tbody>
                   {openPositions.map((p) => {
                     const cur = prices[p.ticker] ?? p.avgCost;
@@ -1135,8 +1154,9 @@ export default function Dashboard({ session }) {
                     return (
                       <tr key={p.ticker}>
                         <td style={{ fontWeight: 500 }}>{p.ticker}</td>
+                        <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{p.currency || "USD"}</td>
                         <td className="mono">{p.shares}</td>
-                        <td className="mono">{fmt(p.avgCost)}</td>
+                        <td className="mono">{fmtCur(p.avgCost, p.currency)}</td>
                         <td>
                           <input
                             type="number" className="price-input"
@@ -1144,15 +1164,15 @@ export default function Dashboard({ session }) {
                             onChange={(e) => setPrice(p.ticker, Number(e.target.value))}
                           />
                         </td>
-                        <td className="mono">{fmt(mv)}</td>
-                        <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(pnl)}</td>
+                        <td className="mono">{fmtCur(mv, p.currency)}</td>
+                        <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmtCur(pnl, p.currency)}</td>
                         <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pct.toFixed(1)}%</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
-              {totalMarketValue > 0 && <div className="mono" style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Valor total de mercado: <span style={{ color: "var(--text)" }}>{fmt(totalMarketValue)}</span></div>}
+              {totalMarketValue > 0 && <div className="mono" style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Valor total de mercado (convertido a {currency}): <span style={{ color: "var(--text)" }}>{fmt(totalMarketValue)}</span></div>}
             </div>
           )}
         </div>
@@ -1178,7 +1198,7 @@ export default function Dashboard({ session }) {
             </div>
           </div>
           <TradeTable
-            trades={currencyTrades.filter((t) => {
+            trades={trades.filter((t) => {
               const isOpen = t.type === "option" ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
               if (tab === "open") return isOpen;
               if (tab === "closed") return !isOpen;
@@ -1221,7 +1241,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onC
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th>Fecha</th><th>Ticker</th><th>Tipo</th><th>Cant.</th><th>Comisión</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Ticker</th><th>Divisa</th><th>Tipo</th><th>Cant.</th><th>Comisión</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
         <tbody>
           {sorted.map((t) => {
             const isOption = t.type === "option";
@@ -1237,13 +1257,14 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onC
               <tr key={t.id}>
                 <td className="mono" style={{ fontSize: 12 }}>{t.date}</td>
                 <td style={{ fontWeight: 500 }}>{t.ticker}</td>
+                <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{t.currency || "USD"}</td>
                 <td style={{ fontSize: 13 }}>
                   {tradeLabel(t)}
                   {isOption && t.expiration && <div style={{ fontSize: 11, color: "var(--muted)" }}>Vence {t.expiration}</div>}
                   {t.notes && (t.notes.startsWith("Asignación") || t.notes.startsWith("Roll")) && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
                 </td>
                 <td className="mono">{t.qty}</td>
-                <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmt(totalCommission) : "—"}</td>
+                <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmtCur(totalCommission, t.currency) : "—"}</td>
                 <td>
                   <span
                     className={`badge ${expired ? "badge-open" : (isAssigned || isRolled) ? "badge-closed" : isOpen ? "badge-open" : "badge-closed"}`}
@@ -1257,7 +1278,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onC
                     {expired ? "Vencida" : isAssigned ? "Asignada" : isRolled ? "Rolada" : isOpen ? "Abierto" : "Cerrado"}
                   </span>
                 </td>
-                <td className="mono" style={{ color: pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pnl == null ? "—" : fmt(pnl)}</td>
+                <td className="mono" style={{ color: pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pnl == null ? "—" : fmtCur(pnl, t.currency)}</td>
                 <td>
                   <div style={{ display: "flex", gap: 6 }}>
                     {isOption && isOpen && <button className="icon-btn" style={{ color: "var(--gain)" }} title="Cerrar / Asignar / Roll" onClick={() => onClose(t)}><CheckCircle2 size={15} /></button>}
