@@ -576,6 +576,9 @@ export default function Dashboard({ session }) {
   }, [stockTrades]);
 
   const openPositions = positions.filter((p) => p.shares > 0);
+  // Para saber, fila a fila en el historial, si UN ticker sigue teniendo acciones abiertas hoy
+  // (no basta con mirar si esa fila concreta fue una "compra": pudo venderse después).
+  const openSharesByTicker = useMemo(() => Object.fromEntries(positions.map((p) => [p.ticker, p.shares])), [positions]);
   const totalMarketValue = openPositions.reduce((s, p) => s + fx((prices[p.ticker] ?? p.avgCost) * p.shares, p.currency), 0);
   const stockRealized = positions.reduce((s, p) => s + fx(p.realized, p.currency), 0);
   const stockUnrealized = openPositions.reduce((s, p) => s + fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency), 0);
@@ -1269,7 +1272,9 @@ export default function Dashboard({ session }) {
           </div>
           <TradeTable
             trades={trades.filter((t) => {
-              const isOpen = t.type === "option" ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
+              const isOpen = t.type === "option"
+                ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled")
+                : (t.action === "buy" && (openSharesByTicker[t.ticker] || 0) > 0);
               if (tab === "open") return isOpen;
               if (tab === "closed") return !isOpen;
               return true;
@@ -1277,6 +1282,7 @@ export default function Dashboard({ session }) {
             sellPnlById={sellPnlById}
             markPrices={markPrices}
             tradesById={tradesById}
+            openSharesByTicker={openSharesByTicker}
             onDelete={deleteTrade}
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
@@ -1304,7 +1310,7 @@ export default function Dashboard({ session }) {
   );
 }
 
-function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onClose, onReopen }) {
+function TradeTable({ trades, sellPnlById, markPrices, tradesById, openSharesByTicker, onDelete, onClose, onReopen }) {
   if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
   const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -1317,7 +1323,12 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, onDelete, onC
             const isOption = t.type === "option";
             const isAssigned = isOption && t.status === "assigned";
             const isRolled = isOption && t.status === "rolled";
-            const isOpen = isOption ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled") : t.action === "buy";
+            // Para acciones: una fila de "compra" solo cuenta como abierta si ESE TICKER todavía
+            // tiene acciones en cartera hoy (no basta con que esta fila concreta fuera una compra:
+            // pudo venderse después).
+            const isOpen = isOption
+              ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled")
+              : (t.action === "buy" && (openSharesByTicker?.[t.ticker] || 0) > 0);
             const expired = isOption && isOpen && t.expiration && t.expiration < todayStr;
             const pnl = isOption
               ? ((t.status === "closed" || t.status === "assigned") ? optionPnL(t, tradesById) : t.status === "rolled" ? 0 : unrealizedOptionPnL(t, markPrices))
