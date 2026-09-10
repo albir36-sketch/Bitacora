@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Cell, LabelList,
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
 import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp } from "lucide-react";
 import { supabase } from "./supabaseClient";
@@ -571,10 +571,19 @@ export default function Dashboard({ session }) {
 
   const byTickerChart = useMemo(() => {
     const map = {};
-    for (const t of closedSells) map[t.ticker] = (map[t.ticker] || 0) + (sellPnlById[t.id] ?? 0);
-    for (const t of realizedOptions) map[t.ticker] = (map[t.ticker] || 0) + optionPnL(t, tradesById);
-    for (const d of currencyDividends) map[d.ticker] = (map[d.ticker] || 0) + d.amount;
-    return Object.entries(map).map(([ticker, pnl]) => ({ ticker, pnl: Math.round(pnl * 100) / 100 })).sort((a, b) => b.pnl - a.pnl);
+    function bump(ticker, pnl, kind) {
+      if (!map[ticker]) map[ticker] = { pnl: 0, stockN: 0, optN: 0, divN: 0 };
+      map[ticker].pnl += pnl;
+      if (kind === "stock") map[ticker].stockN += 1;
+      else if (kind === "option") map[ticker].optN += 1;
+      else map[ticker].divN += 1;
+    }
+    for (const t of closedSells) bump(t.ticker, sellPnlById[t.id] ?? 0, "stock");
+    for (const t of realizedOptions) bump(t.ticker, optionPnL(t, tradesById), "option");
+    for (const d of currencyDividends) bump(d.ticker, d.amount, "dividend");
+    return Object.entries(map)
+      .map(([ticker, v]) => ({ ticker, pnl: Math.round(v.pnl * 100) / 100, stockN: v.stockN, optN: v.optN, divN: v.divN }))
+      .sort((a, b) => b.pnl - a.pnl);
   }, [closedSells, realizedOptions, sellPnlById, tradesById, currencyDividends]);
 
   // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que a\u00fan tienes) ----------
@@ -684,6 +693,12 @@ export default function Dashboard({ session }) {
   const gainsOptions = periodDelta(optionPnlPoints);
   const gainsDividends = periodDelta(dividendPnlPoints);
   const gainsTotal = gainsStocks + gainsOptions + gainsDividends;
+
+  const inActiveGainsPeriod = (d) => d >= activeGainsPeriod.start && d <= todayStr;
+  const gainsStocksCount = closedSells.filter((t) => inActiveGainsPeriod(t.date)).length;
+  const gainsOptionsClosedCount = realizedOptions.filter((t) => t.status === "closed" && inActiveGainsPeriod(t.closeDate || t.date)).length;
+  const gainsOptionsAssignedCount = realizedOptions.filter((t) => t.status === "assigned" && inActiveGainsPeriod(t.closeDate || t.date)).length;
+  const gainsDividendsCount = currencyDividends.filter((d) => inActiveGainsPeriod(d.date)).length;
 
   // serie combinada de valor de cuenta (capital aportado + P&L realizado) para la gráfica
   const accountValueChart = useMemo(() => {
@@ -927,18 +942,21 @@ export default function Dashboard({ session }) {
           <div className="panel">
             <div className="panel-head"><div className="panel-title">P&L por ticker</div></div>
             {byTickerChart.length === 0 ? <div className="empty">Sin trades cerrados aún</div> : (
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={byTickerChart}>
-                  <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="ticker" tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
-                  <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
-                  <ReferenceLine y={0} stroke="#20304C" />
-                  <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "P&L"]} />
-                  <Bar dataKey="pnl" radius={[3, 3, 0, 0]}>
-                    {byTickerChart.map((d, i) => <Cell key={i} fill={d.pnl >= 0 ? "#34D399" : "#F4665A"} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <div className="cards">
+                {byTickerChart.map((d) => {
+                  const parts = [];
+                  if (d.stockN > 0) parts.push(`${d.stockN} acción${d.stockN > 1 ? "es" : ""}`);
+                  if (d.optN > 0) parts.push(`${d.optN} opción${d.optN > 1 ? "es" : ""}`);
+                  if (d.divN > 0) parts.push(`${d.divN} dividendo${d.divN > 1 ? "s" : ""}`);
+                  return (
+                    <div className="card" key={d.ticker}>
+                      <div className="card-label">{d.ticker}</div>
+                      <div className="card-value" style={{ color: d.pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(d.pnl)}</div>
+                      <div className="card-sub">{parts.join(" · ")}</div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
@@ -990,43 +1008,23 @@ export default function Dashboard({ session }) {
             <div className="card">
               <div className="card-label">Acciones</div>
               <div className="card-value" style={{ color: gainsStocks >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsStocks)}</div>
-              <div className="card-sub">compra/venta de acciones</div>
+              <div className="card-sub">{gainsStocksCount} venta{gainsStocksCount === 1 ? "" : "s"} cerrada{gainsStocksCount === 1 ? "" : "s"}</div>
             </div>
             <div className="card">
               <div className="card-label">Opciones</div>
               <div className="card-value" style={{ color: gainsOptions >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsOptions)}</div>
-              <div className="card-sub">primas cerradas / asignadas</div>
+              <div className="card-sub">{gainsOptionsClosedCount} cerrada{gainsOptionsClosedCount === 1 ? "" : "s"} · {gainsOptionsAssignedCount} asignada{gainsOptionsAssignedCount === 1 ? "" : "s"}</div>
             </div>
             <div className="card">
               <div className="card-label">Dividendos</div>
               <div className="card-value" style={{ color: gainsDividends >= 0 ? "var(--gain)" : "var(--muted)" }}>{fmt(gainsDividends)}</div>
-              <div className="card-sub">cobrados en el periodo</div>
+              <div className="card-sub">{gainsDividendsCount > 0 ? `${gainsDividendsCount} cobrado${gainsDividendsCount === 1 ? "" : "s"}` : "sin dividendos en este periodo"}</div>
             </div>
             <div className="card">
               <div className="card-label">Total</div>
               <div className="card-value big" style={{ color: gainsTotal >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsTotal)}</div>
               <div className="card-sub">{activeGainsPeriod.label === "TODO" ? "desde el inicio" : `desde ${activeGainsPeriod.start}`}</div>
             </div>
-          </div>
-
-          <div style={{ marginTop: 20 }}>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={[
-                { name: "Acciones", valor: Math.round(gainsStocks * 100) / 100 },
-                { name: "Opciones", valor: Math.round(gainsOptions * 100) / 100 },
-                { name: "Dividendos", valor: Math.round(gainsDividends * 100) / 100 },
-              ]} margin={{ top: 24 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="name" tick={{ fill: "#7E8CA6", fontSize: 12 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
-                <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
-                <ReferenceLine y={0} stroke="#20304C" />
-                <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "Resultado"]} />
-                <Bar dataKey="valor" radius={[3, 3, 0, 0]}>
-                  {[gainsStocks, gainsOptions, gainsDividends].map((v, i) => <Cell key={i} fill={v >= 0 ? "#34D399" : "#F4665A"} />)}
-                  <LabelList dataKey="valor" position="top" formatter={fmt} style={{ fill: "var(--text)", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }} />
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
           </div>
         </div>
         )}
