@@ -3,7 +3,7 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 export const CURRENCIES = [
@@ -655,6 +655,36 @@ export default function Dashboard({ session }) {
 
   const depositsInPeriod = currencyCashTx.filter((c) => c.date >= activePeriod.start && c.date <= todayStr);
 
+  // ---------- plusvalías por categoría (acciones / opciones / dividendos) ----------
+  const [gainsPeriod, setGainsPeriod] = useState("ytd");
+  const activeGainsPeriod = PERIODS.find((p) => p.id === gainsPeriod) || PERIODS[4];
+
+  function cumulativePoints(events) {
+    const sorted = [...events].sort((a, b) => new Date(a.date) - new Date(b.date));
+    let acc = 0;
+    return sorted.map((e) => { acc += e.pnl; return { date: e.date, acumulado: acc }; });
+  }
+  const stockPnlPoints = useMemo(
+    () => cumulativePoints(closedSells.map((t) => ({ date: t.date, pnl: sellPnlById[t.id] ?? 0 }))),
+    [closedSells, sellPnlById]
+  );
+  const optionPnlPoints = useMemo(
+    () => cumulativePoints(realizedOptions.map((t) => ({ date: t.closeDate || t.date, pnl: optionPnL(t, tradesById) }))),
+    [realizedOptions, tradesById]
+  );
+  const dividendPnlPoints = useMemo(
+    () => cumulativePoints(currencyDividends.map((d) => ({ date: d.date, pnl: d.amount }))),
+    [currencyDividends]
+  );
+
+  function periodDelta(points) {
+    return valueAsOf(points, todayStr, "acumulado") - valueAsOf(points, activeGainsPeriod.start, "acumulado");
+  }
+  const gainsStocks = periodDelta(stockPnlPoints);
+  const gainsOptions = periodDelta(optionPnlPoints);
+  const gainsDividends = periodDelta(dividendPnlPoints);
+  const gainsTotal = gainsStocks + gainsOptions + gainsDividends;
+
   // serie combinada de valor de cuenta (capital aportado + P&L realizado) para la gráfica
   const accountValueChart = useMemo(() => {
     const dates = Array.from(new Set([...capitalPoints.map((p) => p.date), ...realizedPoints.map((p) => p.date)])).sort();
@@ -726,6 +756,7 @@ export default function Dashboard({ session }) {
             { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
             { id: "portfolio", label: "Portafolio", icon: Briefcase },
             { id: "byticker", label: "Por Ticker", icon: Percent },
+            { id: "gains", label: "Plusvalías", icon: TrendingUp },
             { id: "cash", label: "Cuenta de efectivo", icon: Wallet },
             { id: "trades", label: "Trades", icon: ListOrdered },
           ].map((item) => (
@@ -942,6 +973,61 @@ export default function Dashboard({ session }) {
           )}
         </div>
         </>
+        )}
+
+        {view === "gains" && (
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Plusvalías / minusvalías por periodo</div>
+            <div className="tabs" style={{ flexWrap: "wrap" }}>
+              {PERIODS.map((p) => (
+                <button key={p.id} className={`tab ${gainsPeriod === p.id ? "active" : ""}`} onClick={() => setGainsPeriod(p.id)}>{p.label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="cards">
+            <div className="card">
+              <div className="card-label">Acciones</div>
+              <div className="card-value" style={{ color: gainsStocks >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsStocks)}</div>
+              <div className="card-sub">compra/venta de acciones</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Opciones</div>
+              <div className="card-value" style={{ color: gainsOptions >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsOptions)}</div>
+              <div className="card-sub">primas cerradas / asignadas</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Dividendos</div>
+              <div className="card-value" style={{ color: gainsDividends >= 0 ? "var(--gain)" : "var(--muted)" }}>{fmt(gainsDividends)}</div>
+              <div className="card-sub">cobrados en el periodo</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Total</div>
+              <div className="card-value big" style={{ color: gainsTotal >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsTotal)}</div>
+              <div className="card-sub">{activeGainsPeriod.label === "TODO" ? "desde el inicio" : `desde ${activeGainsPeriod.start}`}</div>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 20 }}>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={[
+                { name: "Acciones", valor: Math.round(gainsStocks * 100) / 100 },
+                { name: "Opciones", valor: Math.round(gainsOptions * 100) / 100 },
+                { name: "Dividendos", valor: Math.round(gainsDividends * 100) / 100 },
+              ]}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="name" tick={{ fill: "#7E8CA6", fontSize: 12 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
+                <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
+                <ReferenceLine y={0} stroke="#20304C" />
+                <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "Resultado"]} />
+                <Bar dataKey="valor" radius={[3, 3, 0, 0]}>
+                  {[gainsStocks, gainsOptions, gainsDividends].map((v, i) => <Cell key={i} fill={v >= 0 ? "#34D399" : "#F4665A"} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
         )}
 
         {view === "byticker" && (
