@@ -267,25 +267,43 @@ export default function Dashboard({ session }) {
     return () => { cancelled = true; };
   }, [currency]);
 
+  // Supabase/PostgREST limita cada consulta a 1000 filas por defecto. Con este historial
+  // tan grande, hace falta pedir los datos en bloques hasta traerlos todos.
+  async function fetchAllRows(table, orderBy) {
+    const pageSize = 1000;
+    let from = 0;
+    let all = [];
+    while (true) {
+      let query = supabase.from(table).select("*").range(from, from + pageSize - 1);
+      if (orderBy) query = query.order(orderBy, { ascending: true });
+      const { data, error } = await query;
+      if (error) throw error;
+      all = all.concat(data || []);
+      if (!data || data.length < pageSize) break;
+      from += pageSize;
+    }
+    return all;
+  }
+
   async function loadAll() {
     setLoading(true);
     setError("");
-    const [{ data: tradeRows, error: tErr }, { data: priceRows, error: pErr }, { data: cashRows, error: cErr }, { data: divRows, error: dErr }] = await Promise.all([
-      supabase.from("trades").select("*").order("date", { ascending: true }),
-      supabase.from("current_prices").select("*"),
-      supabase.from("cash_transactions").select("*").order("date", { ascending: true }),
-      supabase.from("dividends").select("*").order("date", { ascending: true }),
-    ]);
-    if (tErr) setError(tErr.message);
-    if (pErr) setError((e) => e || pErr.message);
-    if (cErr) setError((e) => e || cErr.message);
-    if (dErr) setError((e) => e || dErr.message);
-    setTrades((tradeRows || []).map(fromRow));
-    const pMap = {};
-    (priceRows || []).forEach((r) => { pMap[r.ticker] = Number(r.price); });
-    setPrices(pMap);
-    setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
-    setDividends((divRows || []).map((r) => ({ id: r.id, ticker: r.ticker, date: r.date, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
+    try {
+      const [tradeRows, priceRows, cashRows, divRows] = await Promise.all([
+        fetchAllRows("trades", "date"),
+        fetchAllRows("current_prices"),
+        fetchAllRows("cash_transactions", "date"),
+        fetchAllRows("dividends", "date"),
+      ]);
+      setTrades((tradeRows || []).map(fromRow));
+      const pMap = {};
+      (priceRows || []).forEach((r) => { pMap[r.ticker] = Number(r.price); });
+      setPrices(pMap);
+      setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
+      setDividends((divRows || []).map((r) => ({ id: r.id, ticker: r.ticker, date: r.date, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
+    } catch (e) {
+      setError(e.message || "No se pudieron cargar los datos.");
+    }
     setLoading(false);
   }
 
