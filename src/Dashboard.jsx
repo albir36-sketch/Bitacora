@@ -1459,7 +1459,7 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency }) {
                   <select value={leg.optionType} onChange={(e) => updateLeg(i, { optionType: e.target.value })}><option value="call">Call</option><option value="put">Put</option></select>
                 </div>
                 <div className="field"><div className="field-label">Strike</div><input type="number" value={leg.strike} onChange={(e) => updateLeg(i, { strike: e.target.value })} /></div>
-                <div className="field"><div className="field-label">Premium</div><input type="number" value={leg.price} onChange={(e) => updateLeg(i, { price: e.target.value })} /></div>
+                <div className="field"><div className="field-label">{leg.action === "sell" ? "Prima cobrada" : "Prima pagada"}</div><input type="number" value={leg.price} onChange={(e) => updateLeg(i, { price: e.target.value })} /></div>
                 <button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => removeLeg(i)} disabled={legs.length <= 1}><Trash2 size={15} /></button>
               </div>
             ))}
@@ -1647,7 +1647,7 @@ function CloseModal({ trade, onCancel, onSave, onAssign, onRoll, tradesById }) {
             <div className="form-grid">
               <div className="field"><div className="field-label">Nuevo vencimiento</div><input type="date" value={newExpiration} onChange={(e) => setNewExpiration(e.target.value)} /></div>
               <div className="field"><div className="field-label">Nuevo strike</div><input type="number" value={newStrike} onChange={(e) => setNewStrike(e.target.value)} /></div>
-              <div className="field"><div className="field-label">Nueva prima ($/contrato)</div><input type="number" value={newPrice} onChange={(e) => setNewPrice(e.target.value)} /></div>
+              <div className="field"><div className="field-label">{originalLeg?.action === "sell" ? "Nueva prima cobrada" : "Nueva prima pagada"} ($/contrato)</div><input type="number" value={newPrice} onChange={(e) => setNewPrice(e.target.value)} /></div>
               <div className="field"><div className="field-label">Comisión de apertura ($, opcional)</div><input type="number" value={newCommission} onChange={(e) => setNewCommission(e.target.value)} placeholder="0.00" /></div>
             </div>
 
