@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Cell,
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell, LabelList,
 } from "recharts";
 import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp } from "lucide-react";
 import { supabase } from "./supabaseClient";
@@ -1015,7 +1015,7 @@ export default function Dashboard({ session }) {
                 { name: "Acciones", valor: Math.round(gainsStocks * 100) / 100 },
                 { name: "Opciones", valor: Math.round(gainsOptions * 100) / 100 },
                 { name: "Dividendos", valor: Math.round(gainsDividends * 100) / 100 },
-              ]}>
+              ]} margin={{ top: 24 }}>
                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="name" tick={{ fill: "#7E8CA6", fontSize: 12 }} axisLine={{ stroke: "#20304C" }} tickLine={false} />
                 <YAxis tick={{ fill: "#7E8CA6", fontSize: 11 }} axisLine={{ stroke: "#20304C" }} tickLine={false} tickFormatter={fmtCompact} width={60} />
@@ -1023,6 +1023,7 @@ export default function Dashboard({ session }) {
                 <Tooltip contentStyle={{ background: "#0E1626", border: "1px solid #20304C", borderRadius: 6, fontSize: 12 }} formatter={(v) => [fmt(v), "Resultado"]} />
                 <Bar dataKey="valor" radius={[3, 3, 0, 0]}>
                   {[gainsStocks, gainsOptions, gainsDividends].map((v, i) => <Cell key={i} fill={v >= 0 ? "#34D399" : "#F4665A"} />)}
+                  <LabelList dataKey="valor" position="top" formatter={fmt} style={{ fill: "var(--text)", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
