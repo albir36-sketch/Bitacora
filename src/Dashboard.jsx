@@ -1096,8 +1096,8 @@ export default function Dashboard({ session }) {
                       <td style={{ fontWeight: 500 }}>{r.ticker}</td>
                       <td className="mono">{r.shares}</td>
                       <td className="mono">{fmt(r.avgCost)}</td>
-                      <td className="mono" style={{ color: r.optIncome > 0 ? "var(--gain)" : "var(--muted)" }}>{r.optIncome > 0 ? fmt(r.optIncome) : "—"}</td>
-                      <td className="mono" style={{ color: r.divIncome > 0 ? "var(--gain)" : "var(--muted)" }}>{r.divIncome > 0 ? fmt(r.divIncome) : "—"}</td>
+                      <td className="mono" style={{ color: r.optIncome === 0 ? "var(--muted)" : r.optIncome > 0 ? "var(--gain)" : "var(--loss)" }}>{r.optIncome === 0 ? "—" : fmt(r.optIncome)}</td>
+                      <td className="mono" style={{ color: r.divIncome === 0 ? "var(--muted)" : "var(--gain)" }}>{r.divIncome === 0 ? "—" : fmt(r.divIncome)}</td>
                       <td className="mono" style={{ fontWeight: 600 }}>{fmt(r.adjustedAvg)}</td>
                       <td className="mono" style={{ color: "var(--gold)" }}>{r.pctRecovered == null ? "—" : `${r.pctRecovered.toFixed(1)}%`}</td>
                       <td className="mono" style={{ color: r.totalReturnPct == null ? "var(--muted)" : r.totalReturnPct >= 0 ? "var(--gain)" : "var(--loss)" }}>
