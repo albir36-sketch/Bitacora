@@ -205,28 +205,37 @@ function computeCurrencySummary(allTrades, allCashTx, allDividends, prices, mark
   const stockTrades = curTrades.filter((t) => t.type === "stock");
   const optionTrades = curTrades.filter((t) => t.type === "option");
 
-  const byTicker = {};
+  const byTicker = {}; // ticker -> { lots: [{qtyRemaining, price, commissionPerShare}] }
   const sorted = [...stockTrades].sort((a, b) => new Date(a.date) - new Date(b.date));
+  let stockRealized = 0;
   for (const t of sorted) {
     const tk = t.ticker;
-    if (!byTicker[tk]) byTicker[tk] = { shares: 0, avgCost: 0, totalCost: 0, realized: 0 };
+    if (!byTicker[tk]) byTicker[tk] = { lots: [] };
     const p = byTicker[tk];
     if (t.action === "buy") {
-      p.totalCost += t.qty * t.price + (t.commission || 0);
-      p.shares += t.qty;
-      p.avgCost = p.shares > 0 ? p.totalCost / p.shares : 0;
+      const commissionPerShare = t.qty > 0 ? (t.commission || 0) / t.qty : 0;
+      p.lots.push({ qtyRemaining: t.qty, price: t.price, commissionPerShare });
     } else {
-      const sellQty = Math.min(t.qty, p.shares);
-      const pnl = (t.price - p.avgCost) * sellQty - (t.commission || 0);
-      p.realized += pnl;
-      p.totalCost -= p.avgCost * sellQty;
-      p.shares -= sellQty;
-      if (p.shares <= 0.0001) { p.shares = 0; p.totalCost = 0; p.avgCost = 0; }
+      let qtyToSell = t.qty;
+      let pnl = -(t.commission || 0);
+      while (qtyToSell > 0.0001 && p.lots.length > 0) {
+        const lot = p.lots[0]; // FIFO: el lote más antiguo primero
+        const take = Math.min(lot.qtyRemaining, qtyToSell);
+        pnl += (t.price - lot.price - lot.commissionPerShare) * take;
+        lot.qtyRemaining -= take;
+        qtyToSell -= take;
+        if (lot.qtyRemaining <= 0.0001) p.lots.shift();
+      }
+      stockRealized += pnl;
     }
   }
-  const posArr = Object.entries(byTicker).map(([ticker, p]) => ({ ticker, ...p }));
+  const posArr = Object.entries(byTicker).map(([ticker, p]) => {
+    const shares = p.lots.reduce((s, l) => s + l.qtyRemaining, 0);
+    const totalCost = p.lots.reduce((s, l) => s + l.qtyRemaining * (l.price + l.commissionPerShare), 0);
+    const avgCost = shares > 0 ? totalCost / shares : 0;
+    return { ticker, shares, avgCost };
+  });
   const openPos = posArr.filter((p) => p.shares > 0);
-  const stockRealized = posArr.reduce((s, p) => s + p.realized, 0);
   const stockUnrealized = openPos.reduce((s, p) => s + ((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, 0);
 
   const closedOpts = optionTrades.filter((t) => t.status === "closed" || t.status === "assigned");
@@ -550,29 +559,44 @@ export default function Dashboard({ session }) {
     return { total, breakdown };
   }, [trades, cashTx, dividends, prices, markPrices, fxRates, currency]);
 
-  const { positions, sellPnlById } = useMemo(() => {
-    const byTicker = {};
+  // Se aplica FIFO (primera acción comprada, primera vendida) tal como exige la normativa
+  // fiscal española, en vez de un precio medio ponderado. Esto también nos deja saber EXACTAMENTE
+  // qué compra concreta sigue abierta (lotRemainingByTradeId), no solo el total del ticker.
+  const { positions, sellPnlById, lotRemainingByTradeId } = useMemo(() => {
+    const byTicker = {}; // ticker -> { lots: [{id, qtyRemaining, price, commissionPerShare}], currency }
     const pnlById = {};
+    const remainingById = {};
     const sorted = [...stockTrades].sort((a, b) => new Date(a.date) - new Date(b.date));
     for (const t of sorted) {
       const tk = t.ticker;
-      if (!byTicker[tk]) byTicker[tk] = { ticker: tk, shares: 0, avgCost: 0, totalCost: 0, realized: 0, currency: t.currency || "USD" };
+      if (!byTicker[tk]) byTicker[tk] = { ticker: tk, lots: [], currency: t.currency || "USD" };
       const p = byTicker[tk];
       if (t.action === "buy") {
-        p.totalCost += t.qty * t.price + (t.commission || 0);
-        p.shares += t.qty;
-        p.avgCost = p.shares > 0 ? p.totalCost / p.shares : 0;
+        const commissionPerShare = t.qty > 0 ? (t.commission || 0) / t.qty : 0;
+        p.lots.push({ id: t.id, qtyRemaining: t.qty, price: t.price, commissionPerShare });
+        remainingById[t.id] = t.qty;
       } else {
-        const sellQty = Math.min(t.qty, p.shares);
-        const pnl = (t.price - p.avgCost) * sellQty - (t.commission || 0);
+        let qtyToSell = t.qty;
+        let pnl = -(t.commission || 0); // comisión de la venta, aparte de las comisiones de compra ya prorrateadas
+        while (qtyToSell > 0.0001 && p.lots.length > 0) {
+          const lot = p.lots[0]; // el lote más antiguo primero: FIFO
+          const take = Math.min(lot.qtyRemaining, qtyToSell);
+          pnl += (t.price - lot.price - lot.commissionPerShare) * take;
+          lot.qtyRemaining -= take;
+          remainingById[lot.id] = lot.qtyRemaining;
+          qtyToSell -= take;
+          if (lot.qtyRemaining <= 0.0001) p.lots.shift();
+        }
         pnlById[t.id] = pnl;
-        p.realized += pnl;
-        p.totalCost -= p.avgCost * sellQty;
-        p.shares -= sellQty;
-        if (p.shares <= 0.0001) { p.shares = 0; p.totalCost = 0; p.avgCost = 0; }
       }
     }
-    return { positions: Object.values(byTicker), sellPnlById: pnlById };
+    const positionsArr = Object.values(byTicker).map((p) => {
+      const shares = p.lots.reduce((s, l) => s + l.qtyRemaining, 0);
+      const totalCost = p.lots.reduce((s, l) => s + l.qtyRemaining * (l.price + l.commissionPerShare), 0);
+      const avgCost = shares > 0 ? totalCost / shares : 0;
+      return { ticker: p.ticker, shares, avgCost, totalCost, currency: p.currency };
+    });
+    return { positions: positionsArr, sellPnlById: pnlById, lotRemainingByTradeId: remainingById };
   }, [stockTrades]);
 
   const openPositions = positions.filter((p) => p.shares > 0);
@@ -580,7 +604,7 @@ export default function Dashboard({ session }) {
   // (no basta con mirar si esa fila concreta fue una "compra": pudo venderse después).
   const openSharesByTicker = useMemo(() => Object.fromEntries(positions.map((p) => [p.ticker, p.shares])), [positions]);
   const totalMarketValue = openPositions.reduce((s, p) => s + fx((prices[p.ticker] ?? p.avgCost) * p.shares, p.currency), 0);
-  const stockRealized = positions.reduce((s, p) => s + fx(p.realized, p.currency), 0);
+  const stockRealized = stockTrades.filter((t) => t.action === "sell").reduce((s, t) => s + fx(sellPnlById[t.id] ?? 0, t.currency), 0);
   const stockUnrealized = openPositions.reduce((s, p) => s + fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency), 0);
 
   const closedOptions = optionTrades.filter((t) => t.status === "closed");
@@ -1274,7 +1298,7 @@ export default function Dashboard({ session }) {
             trades={trades.filter((t) => {
               const isOpen = t.type === "option"
                 ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled")
-                : (t.action === "buy" && (openSharesByTicker[t.ticker] || 0) > 0);
+                : (t.action === "buy" && (lotRemainingByTradeId[t.id] || 0) > 0.0001);
               if (tab === "open") return isOpen;
               if (tab === "closed") return !isOpen;
               return true;
@@ -1282,7 +1306,7 @@ export default function Dashboard({ session }) {
             sellPnlById={sellPnlById}
             markPrices={markPrices}
             tradesById={tradesById}
-            openSharesByTicker={openSharesByTicker}
+            lotRemainingByTradeId={lotRemainingByTradeId}
             onDelete={deleteTrade}
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
@@ -1310,7 +1334,7 @@ export default function Dashboard({ session }) {
   );
 }
 
-function TradeTable({ trades, sellPnlById, markPrices, tradesById, openSharesByTicker, onDelete, onClose, onReopen }) {
+function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingByTradeId, onDelete, onClose, onReopen }) {
   if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
   const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -1323,12 +1347,13 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, openSharesByT
             const isOption = t.type === "option";
             const isAssigned = isOption && t.status === "assigned";
             const isRolled = isOption && t.status === "rolled";
-            // Para acciones: una fila de "compra" solo cuenta como abierta si ESE TICKER todavía
-            // tiene acciones en cartera hoy (no basta con que esta fila concreta fuera una compra:
-            // pudo venderse después).
+            // Para acciones: FIFO (norma fiscal española) nos dice exactamente cuánto de ESTA
+            // compra concreta sigue sin vender — no basta con mirar el total del ticker.
+            const remaining = lotRemainingByTradeId?.[t.id];
             const isOpen = isOption
               ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled")
-              : (t.action === "buy" && (openSharesByTicker?.[t.ticker] || 0) > 0);
+              : (t.action === "buy" && (remaining || 0) > 0.0001);
+            const partial = !isOption && t.action === "buy" && remaining > 0.0001 && remaining < t.qty - 0.0001;
             const expired = isOption && isOpen && t.expiration && t.expiration < todayStr;
             const pnl = isOption
               ? ((t.status === "closed" || t.status === "assigned") ? optionPnL(t, tradesById) : t.status === "rolled" ? 0 : unrealizedOptionPnL(t, markPrices))
@@ -1344,7 +1369,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, openSharesByT
                   {isOption && t.expiration && <div style={{ fontSize: 11, color: "var(--muted)" }}>Vence {t.expiration}</div>}
                   {t.notes && (t.notes.startsWith("Asignación") || t.notes.startsWith("Roll")) && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
                 </td>
-                <td className="mono">{t.qty}</td>
+                <td className="mono">{t.qty}{partial && <div style={{ fontSize: 10, color: "var(--gold)" }}>quedan {remaining}</div>}</td>
                 <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmtCur(totalCommission, t.currency) : "—"}</td>
                 <td>
                   <span
