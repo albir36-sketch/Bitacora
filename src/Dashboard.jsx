@@ -1006,7 +1006,7 @@ export default function Dashboard({ session }) {
 
           <div className="cards">
             <div className="card">
-              <div className="card-label">Acciones</div>
+              <div className="card-label">Acciones/ETF</div>
               <div className="card-value" style={{ color: gainsStocks >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(gainsStocks)}</div>
               <div className="card-sub">{gainsStocksCount} venta{gainsStocksCount === 1 ? "" : "s"} cerrada{gainsStocksCount === 1 ? "" : "s"}</div>
             </div>
