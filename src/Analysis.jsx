@@ -54,7 +54,19 @@ const INVESTORS = [
   { id: "greenblatt", label: "Joel Greenblatt (Fórmula Mágica)" },
   { id: "piotroski", label: "Piotroski (F-Score simplificado)" },
   { id: "buffett", label: "Warren Buffett (calidad + poca deuda)" },
+  { id: "dalio", label: "Ray Dalio (ciclo económico)" },
 ];
+
+// Ray Dalio no criba por fundamentales de la empresa — su enfoque es de ciclo económico y clase de
+// activo. Esta lectura es una interpretación macro (no un hecho objetivo como los ratios de Graham)
+// y hay que revisarla de vez en cuando, porque el ciclo cambia. Última revisión: septiembre 2026.
+const CURRENT_CYCLE = {
+  label: "Reflación — crecimiento e inflación ambos elevados",
+  updated: "septiembre 2026",
+  summary: "Crecimiento resistente pero inflación aún por encima del objetivo de la Fed (~3-3.4%), con la Fed en modo cauto (más cerca de mantener/subir que de bajar tipos).",
+  favored: ["Energía", "Materiales", "Financieras", "Industriales"],
+  caution: ["Inmobiliario", "Utilities"],
+};
 
 function evaluateGraham(years, nowRatios, livePrice) {
   if (years.length === 0) return [];
@@ -203,7 +215,7 @@ export default function Analysis({ session }) {
 
   async function addCompany(data) {
     setError("");
-    const row = { user_id: userId, ticker: data.ticker.toUpperCase().trim(), company_name: data.company_name || null, currency: data.currency || "USD", target1: null, target2: null, sell1: null };
+    const row = { user_id: userId, ticker: data.ticker.toUpperCase().trim(), company_name: data.company_name || null, sector: data.sector || null, currency: data.currency || "USD", target1: null, target2: null, sell1: null };
     const { data: inserted, error: err } = await supabase.from("company_analysis").insert(row).select().single();
     if (err) { setError(err.message); return; }
     setCompanies((prev) => [...prev, inserted].sort((a, b) => a.ticker.localeCompare(b.ticker)));
@@ -295,6 +307,8 @@ export default function Analysis({ session }) {
                 </div>
               ))}
             </div>
+          ) : investorFilter === "dalio" ? (
+            <DalioPanel companies={companies} onSelect={setSelectedId} />
           ) : (
             <ScreeningList
               companies={companies}
@@ -329,6 +343,17 @@ export default function Analysis({ session }) {
             <TargetCard label="Objetivo 1" value={selected.target1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target1: v })} />
             <TargetCard label="Objetivo 2" value={selected.target2} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target2: v })} />
             <TargetCard label="Venta 1" value={selected.sell1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { sell1: v })} />
+            <div className="card">
+              <div className="card-label">Sector</div>
+              <select
+                value={selected.sector || ""}
+                onChange={(e) => updateCompany(selected.id, { sector: e.target.value || null })}
+                style={{ marginTop: 4 }}
+              >
+                <option value="">— Sin especificar —</option>
+                {SECTORS.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
           </div>
 
           {years.length === 0 ? <div className="empty">Añade al menos un año para empezar a calcular los ratios</div> : (
@@ -380,6 +405,57 @@ export default function Analysis({ session }) {
 
       {showAddCompany && <AddCompanyModal onCancel={() => setShowAddCompany(false)} onSave={addCompany} />}
       {showAddYear && <AddYearModal onCancel={() => setShowAddYear(false)} onSave={addYear} existingYears={years.map((y) => y.year)} />}
+    </div>
+  );
+}
+
+function DalioPanel({ companies, onSelect }) {
+  const favored = companies.filter((c) => CURRENT_CYCLE.favored.includes(c.sector));
+  const caution = companies.filter((c) => CURRENT_CYCLE.caution.includes(c.sector));
+  const neutral = companies.filter((c) => !CURRENT_CYCLE.favored.includes(c.sector) && !CURRENT_CYCLE.caution.includes(c.sector));
+
+  return (
+    <div>
+      <div className="panel" style={{ marginBottom: 16, background: "var(--panel2)" }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>{CURRENT_CYCLE.label}</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 10 }}>{CURRENT_CYCLE.summary}</div>
+        <div style={{ fontSize: 12 }}>
+          <span style={{ color: "var(--gain)" }}>Favorece: {CURRENT_CYCLE.favored.join(", ")}</span>
+          {" · "}
+          <span style={{ color: "var(--loss)" }}>Con cautela: {CURRENT_CYCLE.caution.join(", ")}</span>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+          Lectura macro (no un ratio objetivo) — actualizada {CURRENT_CYCLE.updated}. Ray Dalio no criba por fundamentales de la empresa, sino por en qué punto del ciclo económico estamos.
+        </div>
+      </div>
+
+      {companies.some((c) => !c.sector) && (
+        <div className="error-banner" style={{ marginBottom: 14, background: "#2A2410", color: "var(--gold)" }}>
+          Algunas empresas no tienen sector asignado — entra en cada una y edítalo para que aparezcan clasificadas aquí.
+        </div>
+      )}
+
+      <CompanyGroup title="Favorecidas por el ciclo actual" companies={favored} color="var(--gain)" onSelect={onSelect} />
+      <CompanyGroup title="Neutrales / sin sector claro para este ciclo" companies={neutral} color="var(--muted)" onSelect={onSelect} />
+      <CompanyGroup title="Con cautela en este ciclo" companies={caution} color="var(--loss)" onSelect={onSelect} />
+    </div>
+  );
+}
+
+function CompanyGroup({ title, companies, color, onSelect }) {
+  if (companies.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color, marginBottom: 8 }}>{title} ({companies.length})</div>
+      <div className="cards">
+        {companies.map((c) => (
+          <div key={c.id} className="card" style={{ cursor: "pointer" }} onClick={() => onSelect(c.id)}>
+            <div className="card-label">{c.ticker}</div>
+            <div className="card-value" style={{ fontSize: 16 }}>{c.company_name || "—"}</div>
+            <div className="card-sub">{c.sector || "sin sector"}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -501,14 +577,20 @@ function TTMField({ label, value, onSave }) {
   );
 }
 
+const SECTORS = [
+  "Energía", "Materiales", "Industriales", "Financieras", "Consumo discrecional", "Consumo básico",
+  "Salud", "Tecnología", "Comunicación", "Utilities", "Inmobiliario",
+];
+
 function AddCompanyModal({ onCancel, onSave }) {
   const [ticker, setTicker] = useState("");
   const [name, setName] = useState("");
   const [currency, setCurrency] = useState("USD");
+  const [sector, setSector] = useState("");
 
   function submit() {
     if (!ticker) return;
-    onSave({ ticker, company_name: name, currency });
+    onSave({ ticker, company_name: name, currency, sector });
   }
 
   return (
@@ -522,7 +604,13 @@ function AddCompanyModal({ onCancel, onSave }) {
               <option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option>
             </select>
           </div>
-          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Nombre (opcional)</div><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Halliburton" /></div>
+          <div className="field"><div className="field-label">Sector (opcional, para el filtro de Ray Dalio)</div>
+            <select value={sector} onChange={(e) => setSector(e.target.value)}>
+              <option value="">— Sin especificar —</option>
+              {SECTORS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="field"><div className="field-label">Nombre (opcional)</div><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Halliburton" /></div>
         </div>
         <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar empresa</button>
       </div>
