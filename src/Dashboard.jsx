@@ -832,35 +832,43 @@ export default function Dashboard({ session }) {
     return Object.entries(map).map(([strategy, v]) => ({ strategy, pnl: v.pnl, count: v.count })).sort((a, b) => b.pnl - a.pnl);
   }, [realizedOptions, tradesById, currency, fxRates, activeGainsPeriod.start, todayStr]);
 
-  // ---------- TAE (Dietz Modificado): valor de cuenta al inicio del periodo + aportaciones ----------
-  // de ese mismo periodo, ponderadas por cuánto tiempo llevan dentro (una aportación reciente pesa
-  // poco, una de al principio del periodo pesa casi como si hubiera estado todo el tiempo).
-  // El "valor al inicio" se aproxima con capital aportado + ganancias YA REALIZADAS hasta esa fecha
-  // (no se puede reconstruir el valor de mercado de posiciones abiertas en una fecha pasada, porque
-  // no se guarda un histórico de precios).
+  // ---------- serie de "valor de cuenta" anclada a tus valores reales conocidos ----------
+  // Entre dos valores reales (o desde el último conocido hacia delante), se sigue el cambio de
+  // capital + ganancias realizadas — pero el PUNTO DE PARTIDA en cada tramo es el valor real, no
+  // la aproximación. Así, las ganancias que ya tenías sin realizar ANTES de una fecha con valor
+  // conocido no se cuelan como si fueran rendimiento de un periodo posterior.
   const balancePoints = useMemo(() => {
-    const dates = Array.from(new Set([...capitalPoints.map((p) => p.date), ...realizedPoints.map((p) => p.date)])).sort();
-    return dates.map((d) => ({ date: d, value: valueAsOf(capitalPoints, d, "value") + valueAsOf(realizedPoints, d, "acumulado") }));
-  }, [capitalPoints, realizedPoints]);
+    const sortedSnapshots = [...snapshots].sort((a, b) => new Date(a.date) - new Date(b.date));
+    function rawValue(d) { return valueAsOf(capitalPoints, d, "value") + valueAsOf(realizedPoints, d, "acumulado"); }
+    const dates = Array.from(new Set([
+      ...capitalPoints.map((p) => p.date), ...realizedPoints.map((p) => p.date), ...sortedSnapshots.map((s) => s.date),
+    ])).sort();
+    let anchorDate = null, anchorValue = 0, anchorRaw = 0;
+    return dates.map((d) => {
+      const snap = [...sortedSnapshots].filter((s) => s.date <= d).slice(-1)[0];
+      if (snap && snap.date !== anchorDate) {
+        anchorDate = snap.date;
+        anchorValue = convert(snap.value, snap.currency, currency, fxRates);
+        anchorRaw = rawValue(snap.date);
+      }
+      const raw = rawValue(d);
+      const value = anchorDate ? anchorValue + (raw - anchorRaw) : raw;
+      return { date: d, value };
+    });
+  }, [snapshots, capitalPoints, realizedPoints, currency, fxRates]);
 
   const gainsPeriodDays = Math.max(1, Math.round((new Date(todayStr) - new Date(activeGainsPeriod.start)) / 86400000));
-  // Si tienes guardado un valor de cuenta REAL (de un extracto) cerca de la fecha de inicio del
-  // periodo (hasta 5 días de diferencia), se usa ese en vez de la aproximación — es exacto porque
-  // viene directo del extracto (incluye inversiones + efectivo de verdad, no solo lo realizado).
+  // ¿el propio periodo arranca justo en (o muy cerca de) una fecha con valor real conocido?
   const nearbySnapshot = useMemo(() => {
     const startTime = new Date(activeGainsPeriod.start).getTime();
-    let best = null;
-    let bestDiff = Infinity;
+    let best = null, bestDiff = Infinity;
     for (const s of snapshots) {
       const diff = Math.abs(new Date(s.date).getTime() - startTime);
       if (diff < bestDiff) { bestDiff = diff; best = s; }
     }
-    if (best && bestDiff <= 5 * 86400000) return best;
-    return null;
+    return best && bestDiff <= 5 * 86400000 ? best : null;
   }, [snapshots, activeGainsPeriod.start]);
-  const dietzStartValue = nearbySnapshot
-    ? convert(nearbySnapshot.value, nearbySnapshot.currency, currency, fxRates)
-    : valueAsOf(balancePoints, activeGainsPeriod.start, "value");
+  const dietzStartValue = valueAsOf(balancePoints, activeGainsPeriod.start, "value");
   const dietzContributions = cashTx.filter((c) => c.date >= activeGainsPeriod.start && c.date <= todayStr);
   const dietzWeightedContrib = dietzContributions.reduce((s, c) => {
     const amt = convert(c.type === "deposit" ? c.amount : -c.amount, c.currency, currency, fxRates);
@@ -1312,26 +1320,29 @@ export default function Dashboard({ session }) {
 
           <div style={{ marginTop: 18, display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div className="card" style={{ maxWidth: 320, flex: "1 1 280px" }}>
-              <div className="card-label">TAE (money-weighted, Dietz Mod.)</div>
-              <div className="card-value big" style={{ color: gainsTAE == null ? "var(--muted)" : gainsTAE >= 0 ? "var(--gain)" : "var(--loss)" }}>
-                {gainsTAE == null ? "—" : `${gainsTAE >= 0 ? "+" : ""}${gainsTAE.toFixed(1)}%`}
+              <div className="card-label">Rendimiento del periodo (money-weighted)</div>
+              <div className="card-value big" style={{ color: gainsSimpleReturnPct == null ? "var(--muted)" : gainsSimpleReturnPct >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {gainsSimpleReturnPct == null ? "—" : `${gainsSimpleReturnPct >= 0 ? "+" : ""}${(gainsSimpleReturnPct * 100).toFixed(1)}%`}
               </div>
               <div className="card-sub">
                 {gainsSaldoMedio > 0
                   ? `sobre ${fmt(gainsSaldoMedio)}${nearbySnapshot ? " (valor real)" : ""} · ${gainsPeriodDays}d`
                   : "saldo de referencia no disponible en este periodo"}
+                {gainsTAE != null && <> · anualizado (TAE): <span style={{ color: gainsTAE >= 0 ? "var(--gain)" : "var(--loss)" }}>{gainsTAE >= 0 ? "+" : ""}{gainsTAE.toFixed(1)}%</span></>}
               </div>
             </div>
             <div className="card" style={{ maxWidth: 320, flex: "1 1 280px" }}>
-              <div className="card-label">TAE (time-weighted, TWR)</div>
-              <div className="card-value big" style={{ color: gainsTWR >= 0 ? "var(--gain)" : "var(--loss)" }}>
-                {gainsTWR >= 0 ? "+" : ""}{gainsTWR.toFixed(1)}%
+              <div className="card-label">Rendimiento del periodo (time-weighted)</div>
+              <div className="card-value big" style={{ color: gainsTWRPeriod >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {gainsTWRPeriod >= 0 ? "+" : ""}{(gainsTWRPeriod * 100).toFixed(1)}%
               </div>
-              <div className="card-sub">rendimiento del periodo: {(gainsTWRPeriod * 100).toFixed(1)}% · {gainsPeriodDays}d</div>
+              <div className="card-sub">
+                {gainsPeriodDays}d · anualizado (TWR): <span style={{ color: gainsTWR >= 0 ? "var(--gain)" : "var(--loss)" }}>{gainsTWR >= 0 ? "+" : ""}{gainsTWR.toFixed(1)}%</span>
+              </div>
             </div>
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
-            El primero refleja lo que <strong style={{ color: "var(--text)" }}>tú</strong> ganaste, según cuándo metiste o sacaste dinero. El segundo (como el de tu bróker) aísla el rendimiento de tu <strong style={{ color: "var(--text)" }}>forma de operar</strong>, sin que el timing de tus aportes lo afecte.
+            El número grande es el rendimiento real de este periodo (compáralo con lo que veas en tu bróker para el mismo rango de fechas). El "anualizado" de abajo extrapola ese ritmo a 12 meses — solo es representativo cuando el periodo ya casi terminó; si eliges "Año en curso" a mitad de año, un buen tramo puede anualizarse a un número muy alto sin que eso sea realista. El primero (money-weighted) refleja lo que <strong style={{ color: "var(--text)" }}>tú</strong> ganaste según cuándo metiste o sacaste dinero; el segundo (time-weighted, como tu bróker) aísla el rendimiento de tu <strong style={{ color: "var(--text)" }}>forma de operar</strong>.
           </div>
         </div>
 
