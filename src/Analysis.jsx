@@ -24,7 +24,10 @@ function computeYearRatios(y) {
   const pc = y.current_liabilities || 0, pnc = y.non_current_liabilities || 0;
   const intang = y.intangibles || 0, shares = y.shares || 0;
   const profit = y.profit ?? 0, ebit = y.ebit;
-  const cap = y.market_cap;
+  // La capitalización se calcula, no se guarda directamente: acciones × cotización de cierre de
+  // ese año fiscal (normalmente 31 de diciembre) — o, para "AHORA", acciones × precio en vivo.
+  const cap = (shares && y.year_end_price != null) ? shares * y.year_end_price
+    : (y.market_cap != null ? y.market_cap : null); // market_cap: solo para la columna "AHORA" (precio en vivo)
 
   const fondoManiobra = pc ? ac / pc : null;
   const pctDeuda = (ac + anc) ? ((pc + pnc) / (ac + anc)) * 100 : null;
@@ -40,7 +43,7 @@ function computeYearRatios(y) {
   const earningsYield = (ebit != null && ev) ? (ebit / ev) * 100 : null;
   const medias = (roc != null && earningsYield != null) ? (roc + earningsYield) / 2 : null;
 
-  return { fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, roc, earningsYield, medias };
+  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, roc, earningsYield, medias };
 }
 
 export default function Analysis({ session }) {
@@ -137,7 +140,7 @@ export default function Analysis({ session }) {
     const cap = price != null ? shares * price : null;
     const profit = selected?.ttm_profit ?? latestYear.profit;
     const ebit = selected?.ttm_ebit ?? latestYear.ebit;
-    return computeYearRatios({ ...latestYear, profit, ebit, market_cap: cap });
+    return computeYearRatios({ ...latestYear, profit, ebit, year_end_price: null, market_cap: cap });
   }, [latestYear, livePrice, selected]);
 
   if (loading) return <div className="empty">Cargando análisis…</div>;
@@ -210,7 +213,8 @@ export default function Analysis({ session }) {
                   <RawRow label="Beneficio" years={years} field="profit" onDelete={deleteYear} />
                   <RawRow label="Dividendo/acción" years={years} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
                   <RawRow label="EBIT" years={years} field="ebit" onDelete={deleteYear} />
-                  <RawRow label="Capitalización" years={years} field="market_cap" onDelete={deleteYear} nowValue={nowData ? (latestYear.shares && livePrice ? latestYear.shares * livePrice : null) : null} />
+                  <RawRow label="Cotización cierre de año" years={years} field="year_end_price" decimals={2} onDelete={deleteYear} nowValue={livePrice} />
+                  <ComputedRow label="Capitalización" years={years} calcKey="cap" nowData={nowData} decimals={0} />
                   <ComputedRow label="AC−(PC+PNC)" years={years} calcKey="acMenosPasivos" nowData={nowData} />
                   <ComputedRow label="Fondo de maniobra" years={years} calcKey="fondoManiobra" nowData={nowData} decimals={2} />
                   <ComputedRow label="% Deuda sobre activos" years={years} calcKey="pctDeuda" nowData={nowData} isPct />
@@ -340,7 +344,7 @@ function AddYearModal({ onCancel, onSave, existingYears }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const [fields, setFields] = useState({
     shares: "", current_assets: "", non_current_assets: "", current_liabilities: "", non_current_liabilities: "",
-    intangibles: "", profit: "", dividend_per_share: "", ebit: "", market_cap: "",
+    intangibles: "", profit: "", dividend_per_share: "", ebit: "", year_end_price: "",
   });
 
   function upd(k, v) { setFields((prev) => ({ ...prev, [k]: v })); }
@@ -355,7 +359,7 @@ function AddYearModal({ onCancel, onSave, existingYears }) {
   const labels = {
     shares: "Nº acciones", current_assets: "Activo corriente", non_current_assets: "Activo no corriente",
     current_liabilities: "Pasivo corriente", non_current_liabilities: "Pasivo no corriente", intangibles: "Intangibles",
-    profit: "Beneficio", dividend_per_share: "Dividendo/acción", ebit: "EBIT", market_cap: "Capitalización",
+    profit: "Beneficio", dividend_per_share: "Dividendo/acción", ebit: "EBIT", year_end_price: "Cotización cierre de año",
   };
 
   return (
