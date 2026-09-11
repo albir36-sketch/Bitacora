@@ -872,6 +872,29 @@ export default function Dashboard({ session }) {
   const gainsSimpleReturnPct = gainsSaldoMedio > 0 ? gainsTotal / gainsSaldoMedio : null;
   const gainsTAE = gainsSimpleReturnPct != null ? (Math.pow(1 + gainsSimpleReturnPct, 365 / gainsPeriodDays) - 1) * 100 : null;
 
+  // ---------- TWR (rentabilidad ponderada por tiempo, como la que muestra tu bróker) ----------
+  // A diferencia del TAE/Dietz, el TWR aísla el rendimiento de la ESTRATEGIA del momento en que
+  // metiste o sacaste dinero: se trocea el periodo en cada movimiento de efectivo, se calcula el
+  // rendimiento "orgánico" de cada trozo (sin el efecto del propio movimiento), y se encadenan.
+  const gainsTWRPeriod = useMemo(() => {
+    const flows = [...dietzContributions].sort((a, b) => new Date(a.date) - new Date(b.date));
+    let twr = 1;
+    let segStart = activeGainsPeriod.start;
+    for (const cf of flows) {
+      const dayBeforeCf = new Date(new Date(cf.date).getTime() - 86400000).toISOString().slice(0, 10);
+      const segEnd = dayBeforeCf >= segStart ? dayBeforeCf : segStart;
+      const vStart = valueAsOf(balancePoints, segStart, "value");
+      const vEnd = valueAsOf(balancePoints, segEnd, "value");
+      if (vStart > 0) twr *= (vEnd / vStart);
+      segStart = cf.date; // el siguiente tramo arranca ya con este movimiento incluido
+    }
+    const vStart = valueAsOf(balancePoints, segStart, "value");
+    const vEnd = valueAsOf(balancePoints, todayStr, "value");
+    if (vStart > 0) twr *= (vEnd / vStart);
+    return twr - 1;
+  }, [dietzContributions, balancePoints, activeGainsPeriod.start, todayStr]);
+  const gainsTWR = (Math.pow(1 + gainsTWRPeriod, 365 / gainsPeriodDays) - 1) * 100;
+
   // ---------- histórico mes a mes (mes en curso primero, hacia atrás) ----------
   const monthlyGains = useMemo(() => {
     const allDates = [...stockPnlPoints, ...optionPnlPoints, ...dividendPnlPoints].map((p) => p.date);
@@ -1287,18 +1310,28 @@ export default function Dashboard({ session }) {
             </div>
           )}
 
-          <div style={{ marginTop: 18 }}>
-            <div className="card" style={{ maxWidth: 320 }}>
-              <div className="card-label">TAE (anualizado, saldo medio ponderado)</div>
+          <div style={{ marginTop: 18, display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div className="card" style={{ maxWidth: 320, flex: "1 1 280px" }}>
+              <div className="card-label">TAE (money-weighted, Dietz Mod.)</div>
               <div className="card-value big" style={{ color: gainsTAE == null ? "var(--muted)" : gainsTAE >= 0 ? "var(--gain)" : "var(--loss)" }}>
                 {gainsTAE == null ? "—" : `${gainsTAE >= 0 ? "+" : ""}${gainsTAE.toFixed(1)}%`}
               </div>
               <div className="card-sub">
                 {gainsSaldoMedio > 0
-                  ? `sobre ${fmt(gainsSaldoMedio)} (Dietz Mod.${nearbySnapshot ? ", valor real" : ""}) · ${gainsPeriodDays}d`
+                  ? `sobre ${fmt(gainsSaldoMedio)}${nearbySnapshot ? " (valor real)" : ""} · ${gainsPeriodDays}d`
                   : "saldo de referencia no disponible en este periodo"}
               </div>
             </div>
+            <div className="card" style={{ maxWidth: 320, flex: "1 1 280px" }}>
+              <div className="card-label">TAE (time-weighted, TWR)</div>
+              <div className="card-value big" style={{ color: gainsTWR >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {gainsTWR >= 0 ? "+" : ""}{gainsTWR.toFixed(1)}%
+              </div>
+              <div className="card-sub">rendimiento del periodo: {(gainsTWRPeriod * 100).toFixed(1)}% · {gainsPeriodDays}d</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+            El primero refleja lo que <strong style={{ color: "var(--text)" }}>tú</strong> ganaste, según cuándo metiste o sacaste dinero. El segundo (como el de tu bróker) aísla el rendimiento de tu <strong style={{ color: "var(--text)" }}>forma de operar</strong>, sin que el timing de tus aportes lo afecte.
           </div>
         </div>
 
