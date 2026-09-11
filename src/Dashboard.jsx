@@ -15,6 +15,16 @@ export const CURRENCIES = [
 // así fmt()/fmtCompact() usan siempre el símbolo correcto en cualquier parte del archivo.
 let ACTIVE_SYMBOL = "$";
 function currencySymbol(code) { return CURRENCIES.find((c) => c.code === code)?.symbol || "$"; }
+// Formatea un objeto Date como "YYYY-MM-DD" usando sus componentes LOCALES (año/mes/día tal como
+// los ve el usuario), sin pasar por toISOString() — que convierte a UTC y puede desplazar la fecha
+// un día en zonas horarias por delante de UTC (como España), metiendo eventos del día 31 en el
+// mes/periodo siguiente por error.
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 // Convierte un importe de una divisa a otra usando tasas con base = toCur (rates[fromCur] = cuántas
 // unidades de fromCur equivalen a 1 toCur). Si no hay tasa disponible, devuelve el importe sin convertir.
 function convert(amount, fromCur, toCur, rates) {
@@ -741,11 +751,11 @@ export default function Dashboard({ session }) {
   }
 
   const today = new Date();
-  const todayStr = today.toISOString().slice(0, 10);
-  function isoDaysAgo(n) { const d = new Date(today); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); }
-  function isoMonthsAgo(n) { const d = new Date(today); d.setMonth(d.getMonth() - n); return d.toISOString().slice(0, 10); }
-  function firstOfMonth() { return new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10); }
-  function firstOfYear() { return new Date(today.getFullYear(), 0, 1).toISOString().slice(0, 10); }
+  const todayStr = localDateStr(today);
+  function isoDaysAgo(n) { const d = new Date(today); d.setDate(d.getDate() - n); return localDateStr(d); }
+  function isoMonthsAgo(n) { const d = new Date(today); d.setMonth(d.getMonth() - n); return localDateStr(d); }
+  function firstOfMonth() { return localDateStr(new Date(today.getFullYear(), today.getMonth(), 1)); }
+  function firstOfYear() { return localDateStr(new Date(today.getFullYear(), 0, 1)); }
   const earliestDate = [...cashTx.map((c) => c.date), ...trades.map((t) => t.date)].sort()[0] || todayStr;
 
   const PERIODS = [
@@ -921,9 +931,9 @@ export default function Dashboard({ session }) {
       const monthStartDate = new Date(cur);
       const nextMonthDate = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
       const lastDayDate = new Date(nextMonthDate.getTime() - 86400000);
-      const monthStart = monthStartDate.toISOString().slice(0, 10);
-      const prevDay = new Date(monthStartDate.getTime() - 86400000).toISOString().slice(0, 10);
-      const lastDay = (lastDayDate > today ? today : lastDayDate).toISOString().slice(0, 10);
+      const monthStart = localDateStr(monthStartDate);
+      const prevDay = localDateStr(new Date(monthStartDate.getTime() - 86400000));
+      const lastDay = localDateStr(lastDayDate > today ? today : lastDayDate);
       const stocksM = valueAsOf(stockPnlPoints, lastDay, "acumulado") - valueAsOf(stockPnlPoints, prevDay, "acumulado");
       const optionsM = valueAsOf(optionPnlPoints, lastDay, "acumulado") - valueAsOf(optionPnlPoints, prevDay, "acumulado");
       const dividendsM = valueAsOf(dividendPnlPoints, lastDay, "acumulado") - valueAsOf(dividendPnlPoints, prevDay, "acumulado");
@@ -1581,7 +1591,7 @@ export default function Dashboard({ session }) {
 function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingByTradeId, onDelete, onClose, onReopen }) {
   if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
   const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = localDateStr(new Date());
   return (
     <div className="table-wrap">
       <table>
@@ -1648,7 +1658,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
 function AddTradeModal({ onCancel, onSave, defaultCurrency }) {
   const [type, setType] = useState("stock");
   const [ticker, setTicker] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateStr(new Date()));
   const [qty, setQty] = useState("");
   const [notes, setNotes] = useState("");
   const [commission, setCommission] = useState("");
@@ -1754,7 +1764,7 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency }) {
 }
 
 function AddCashModal({ onCancel, onSave, defaultCurrency }) {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateStr(new Date()));
   const [type, setType] = useState("deposit");
   const [amount, setAmount] = useState("");
   const [notes, setNotes] = useState("");
@@ -1797,7 +1807,7 @@ function AddCashModal({ onCancel, onSave, defaultCurrency }) {
 
 function AddDividendModal({ onCancel, onSave, defaultCurrency }) {
   const [ticker, setTicker] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateStr(new Date()));
   const [amount, setAmount] = useState("");
   const [notes, setNotes] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency || "USD");
@@ -1831,7 +1841,7 @@ function AddDividendModal({ onCancel, onSave, defaultCurrency }) {
 }
 
 function AddSnapshotModal({ onCancel, onSave, defaultCurrency }) {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateStr(new Date()));
   const [value, setValue] = useState("");
   const [notes, setNotes] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency || "USD");
@@ -1866,7 +1876,7 @@ function AddSnapshotModal({ onCancel, onSave, defaultCurrency }) {
 function CloseModal({ trade, onCancel, onSave, onAssign, onRoll, tradesById }) {
   const canAssign = (trade.legs || []).length === 1;
   const [mode, setMode] = useState("close"); // "close" | "assign" | "roll"
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateStr(new Date()));
   const [legCloses, setLegCloses] = useState((trade.legs || []).map(() => ""));
   const [closeCommission, setCloseCommission] = useState("");
 
