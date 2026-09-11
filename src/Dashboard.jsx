@@ -813,25 +813,27 @@ export default function Dashboard({ session }) {
     return Object.entries(map).map(([strategy, v]) => ({ strategy, pnl: v.pnl, count: v.count })).sort((a, b) => b.pnl - a.pnl);
   }, [realizedOptions, tradesById, currency, fxRates, activeGainsPeriod.start, todayStr]);
 
-  // ---------- TAE (rendimiento anualizado sobre el saldo medio ponderado) ----------
-  // Saldo medio ponderado = media del capital aportado (neto), ponderada por los días que
-  // estuvo en cada nivel durante el periodo — así un aporte reciente pesa menos que uno antiguo.
-  function weightedAvgBalance(points, startStr, endStr) {
-    const startVal = valueAsOf(points, startStr, "value");
-    const eventsInRange = points.filter((p) => p.date > startStr && p.date <= endStr);
-    const segments = [{ date: startStr, value: startVal }, ...eventsInRange];
-    let weightedSum = 0;
-    for (let i = 0; i < segments.length; i++) {
-      const segStart = new Date(segments[i].date);
-      const segEnd = i + 1 < segments.length ? new Date(segments[i + 1].date) : new Date(endStr);
-      const days = Math.max(0, (segEnd - segStart) / 86400000);
-      weightedSum += segments[i].value * days;
-    }
-    const totalDays = Math.max(1, (new Date(endStr) - new Date(startStr)) / 86400000);
-    return weightedSum / totalDays;
-  }
+  // ---------- TAE (Dietz Modificado): valor de cuenta al inicio del periodo + aportaciones ----------
+  // de ese mismo periodo, ponderadas por cuánto tiempo llevan dentro (una aportación reciente pesa
+  // poco, una de al principio del periodo pesa casi como si hubiera estado todo el tiempo).
+  // El "valor al inicio" se aproxima con capital aportado + ganancias YA REALIZADAS hasta esa fecha
+  // (no se puede reconstruir el valor de mercado de posiciones abiertas en una fecha pasada, porque
+  // no se guarda un histórico de precios).
+  const balancePoints = useMemo(() => {
+    const dates = Array.from(new Set([...capitalPoints.map((p) => p.date), ...realizedPoints.map((p) => p.date)])).sort();
+    return dates.map((d) => ({ date: d, value: valueAsOf(capitalPoints, d, "value") + valueAsOf(realizedPoints, d, "acumulado") }));
+  }, [capitalPoints, realizedPoints]);
+
   const gainsPeriodDays = Math.max(1, Math.round((new Date(todayStr) - new Date(activeGainsPeriod.start)) / 86400000));
-  const gainsSaldoMedio = weightedAvgBalance(capitalPoints, activeGainsPeriod.start, todayStr);
+  const dietzStartValue = valueAsOf(balancePoints, activeGainsPeriod.start, "value");
+  const dietzContributions = cashTx.filter((c) => c.date >= activeGainsPeriod.start && c.date <= todayStr);
+  const dietzWeightedContrib = dietzContributions.reduce((s, c) => {
+    const amt = convert(c.type === "deposit" ? c.amount : -c.amount, c.currency, currency, fxRates);
+    const daysRemaining = Math.max(0, (new Date(todayStr) - new Date(c.date)) / 86400000);
+    const weight = daysRemaining / gainsPeriodDays;
+    return s + amt * weight;
+  }, 0);
+  const gainsSaldoMedio = dietzStartValue + dietzWeightedContrib;
   const gainsSimpleReturnPct = gainsSaldoMedio > 0 ? gainsTotal / gainsSaldoMedio : null;
   const gainsTAE = gainsSimpleReturnPct != null ? (Math.pow(1 + gainsSimpleReturnPct, 365 / gainsPeriodDays) - 1) * 100 : null;
 
@@ -1227,7 +1229,7 @@ export default function Dashboard({ session }) {
                 {gainsTAE == null ? "—" : `${gainsTAE >= 0 ? "+" : ""}${gainsTAE.toFixed(1)}%`}
               </div>
               <div className="card-sub">
-                {gainsSaldoMedio > 0 ? `sobre ${fmt(gainsSaldoMedio)} de saldo medio · ${gainsPeriodDays}d` : "sin capital aportado en este periodo"}
+                {gainsSaldoMedio > 0 ? `sobre ${fmt(gainsSaldoMedio)} (Dietz Mod.) · ${gainsPeriodDays}d` : "saldo de referencia no disponible en este periodo"}
               </div>
             </div>
           </div>
