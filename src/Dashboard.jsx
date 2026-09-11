@@ -255,6 +255,8 @@ export default function Dashboard({ session }) {
   const [cashTx, setCashTx] = useState([]);
   const [dividends, setDividends] = useState([]);
   const [showAddDividend, setShowAddDividend] = useState(false);
+  const [snapshots, setSnapshots] = useState([]);
+  const [showAddSnapshot, setShowAddSnapshot] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
@@ -322,11 +324,12 @@ export default function Dashboard({ session }) {
     setLoading(true);
     setError("");
     try {
-      const [tradeRows, priceRows, cashRows, divRows] = await Promise.all([
+      const [tradeRows, priceRows, cashRows, divRows, snapRows] = await Promise.all([
         fetchAllRows("trades", "date"),
         fetchAllRows("current_prices"),
         fetchAllRows("cash_transactions", "date"),
         fetchAllRows("dividends", "date"),
+        fetchAllRows("account_snapshots", "date"),
       ]);
       setTrades((tradeRows || []).map(fromRow));
       const pMap = {};
@@ -334,6 +337,7 @@ export default function Dashboard({ session }) {
       setPrices(pMap);
       setCashTx((cashRows || []).map((r) => ({ id: r.id, date: r.date, type: r.type, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
       setDividends((divRows || []).map((r) => ({ id: r.id, ticker: r.ticker, date: r.date, amount: Number(r.amount), notes: r.notes, currency: r.currency || "USD" })));
+      setSnapshots((snapRows || []).map((r) => ({ id: r.id, date: r.date, value: Number(r.value), currency: r.currency || "USD", notes: r.notes })));
     } catch (e) {
       setError(e.message || "No se pudieron cargar los datos.");
     }
@@ -531,6 +535,21 @@ export default function Dashboard({ session }) {
   async function deleteDividend(id) {
     setDividends((prev) => prev.filter((d) => d.id !== id));
     const { error: err } = await supabase.from("dividends").delete().eq("id", id);
+    if (err) { setError(err.message); loadAll(); }
+  }
+
+  async function addSnapshot(data) {
+    setError("");
+    const row = { user_id: userId, date: data.date, value: data.value, currency: data.currency || "USD", notes: data.notes || null };
+    const { data: inserted, error: err } = await supabase.from("account_snapshots").insert(row).select().single();
+    if (err) { setError(err.message); return; }
+    setSnapshots((prev) => [...prev, { id: inserted.id, date: inserted.date, value: Number(inserted.value), currency: inserted.currency || "USD", notes: inserted.notes }]);
+    setShowAddSnapshot(false);
+  }
+
+  async function deleteSnapshot(id) {
+    setSnapshots((prev) => prev.filter((s) => s.id !== id));
+    const { error: err } = await supabase.from("account_snapshots").delete().eq("id", id);
     if (err) { setError(err.message); loadAll(); }
   }
 
@@ -825,7 +844,23 @@ export default function Dashboard({ session }) {
   }, [capitalPoints, realizedPoints]);
 
   const gainsPeriodDays = Math.max(1, Math.round((new Date(todayStr) - new Date(activeGainsPeriod.start)) / 86400000));
-  const dietzStartValue = valueAsOf(balancePoints, activeGainsPeriod.start, "value");
+  // Si tienes guardado un valor de cuenta REAL (de un extracto) cerca de la fecha de inicio del
+  // periodo (hasta 5 días de diferencia), se usa ese en vez de la aproximación — es exacto porque
+  // viene directo del extracto (incluye inversiones + efectivo de verdad, no solo lo realizado).
+  const nearbySnapshot = useMemo(() => {
+    const startTime = new Date(activeGainsPeriod.start).getTime();
+    let best = null;
+    let bestDiff = Infinity;
+    for (const s of snapshots) {
+      const diff = Math.abs(new Date(s.date).getTime() - startTime);
+      if (diff < bestDiff) { bestDiff = diff; best = s; }
+    }
+    if (best && bestDiff <= 5 * 86400000) return best;
+    return null;
+  }, [snapshots, activeGainsPeriod.start]);
+  const dietzStartValue = nearbySnapshot
+    ? convert(nearbySnapshot.value, nearbySnapshot.currency, currency, fxRates)
+    : valueAsOf(balancePoints, activeGainsPeriod.start, "value");
   const dietzContributions = cashTx.filter((c) => c.date >= activeGainsPeriod.start && c.date <= todayStr);
   const dietzWeightedContrib = dietzContributions.reduce((s, c) => {
     const amt = convert(c.type === "deposit" ? c.amount : -c.amount, c.currency, currency, fxRates);
@@ -1002,6 +1037,7 @@ export default function Dashboard({ session }) {
         )}
 
         {view === "cash" && (
+        <>
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Cuenta de efectivo</div>
@@ -1085,6 +1121,35 @@ export default function Dashboard({ session }) {
             )}
           </div>
         </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <div className="panel-title">Valores de cuenta conocidos</div>
+            <button className="btn btn-gold" style={{ padding: "6px 12px", fontSize: 13 }} onClick={() => setShowAddSnapshot(true)}><Plus size={14} /> Añadir valor</button>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Si tienes el valor real de tu cuenta (inversiones + efectivo) a una fecha concreta — por ejemplo, del "Valor liquidativo" de un extracto de tu bróker — guárdalo aquí. La app lo usará para calcular el <strong style={{ color: "var(--text)" }}>TAE</strong> en Plusvalías con más precisión que la aproximación automática.
+          </div>
+          {snapshots.length === 0 ? <div className="empty">Sin valores guardados aún</div> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Fecha</th><th>Divisa</th><th>Valor</th><th>Notas</th><th></th></tr></thead>
+                <tbody>
+                  {[...snapshots].sort((a, b) => new Date(b.date) - new Date(a.date)).map((s) => (
+                    <tr key={s.id}>
+                      <td className="mono" style={{ fontSize: 12 }}>{s.date}</td>
+                      <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{s.currency || "USD"}</td>
+                      <td className="mono" style={{ fontWeight: 600 }}>{fmtCur(s.value, s.currency)}</td>
+                      <td style={{ fontSize: 13, color: "var(--muted)" }}>{s.notes || "—"}</td>
+                      <td><button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => deleteSnapshot(s.id)}><Trash2 size={15} /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        </>
         )}
 
         {view === "dashboard" && (
@@ -1229,7 +1294,9 @@ export default function Dashboard({ session }) {
                 {gainsTAE == null ? "—" : `${gainsTAE >= 0 ? "+" : ""}${gainsTAE.toFixed(1)}%`}
               </div>
               <div className="card-sub">
-                {gainsSaldoMedio > 0 ? `sobre ${fmt(gainsSaldoMedio)} (Dietz Mod.) · ${gainsPeriodDays}d` : "saldo de referencia no disponible en este periodo"}
+                {gainsSaldoMedio > 0
+                  ? `sobre ${fmt(gainsSaldoMedio)} (Dietz Mod.${nearbySnapshot ? ", valor real" : ""}) · ${gainsPeriodDays}d`
+                  : "saldo de referencia no disponible en este periodo"}
               </div>
             </div>
           </div>
@@ -1446,6 +1513,7 @@ export default function Dashboard({ session }) {
       {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} defaultCurrency={currency} />}
       {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} defaultCurrency={currency} />}
       {showAddDividend && <AddDividendModal onCancel={() => setShowAddDividend(false)} onSave={addDividend} defaultCurrency={currency} />}
+      {showAddSnapshot && <AddSnapshotModal onCancel={() => setShowAddSnapshot(false)} onSave={addSnapshot} defaultCurrency={currency} />}
       {closingTrade && (
         <CloseModal
           trade={closingTrade}
@@ -1708,6 +1776,39 @@ function AddDividendModal({ onCancel, onSave, defaultCurrency }) {
         </div>
 
         <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar dividendo</button>
+      </div>
+    </div>
+  );
+}
+
+function AddSnapshotModal({ onCancel, onSave, defaultCurrency }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [value, setValue] = useState("");
+  const [notes, setNotes] = useState("");
+  const [currency, setCurrency] = useState(defaultCurrency || "USD");
+
+  function submit() {
+    if (!value || Number(value) <= 0) return;
+    onSave({ date, value: Number(value), notes, currency });
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-head"><div className="modal-title">Valor de cuenta conocido</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
+
+        <div className="form-grid">
+          <div className="field"><div className="field-label">Fecha</div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          <div className="field"><div className="field-label">Divisa</div>
+            <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Valor total (inversiones + efectivo)</div><input type="number" value={value} onChange={(e) => setValue(e.target.value)} placeholder="0.00" /></div>
+          <div className="field" style={{ gridColumn: "1 / -1" }}><div className="field-label">Notas (opcional)</div><input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ej. Valor liquidativo extracto 2025" /></div>
+        </div>
+
+        <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar valor</button>
       </div>
     </div>
   );
