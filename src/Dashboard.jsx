@@ -798,6 +798,72 @@ export default function Dashboard({ session }) {
   const gainsOptionsAssignedCount = realizedOptions.filter((t) => t.status === "assigned" && inActiveGainsPeriod(t.closeDate || t.date)).length;
   const gainsDividendsCount = dividends.filter((d) => inActiveGainsPeriod(d.date)).length;
 
+  // ---------- opciones del periodo, desglosadas por estrategia ----------
+  const gainsOptionsByStrategy = useMemo(() => {
+    const map = {};
+    for (const t of realizedOptions) {
+      const d = t.closeDate || t.date;
+      if (!inActiveGainsPeriod(d)) continue;
+      const strat = optionStrategy(t);
+      const pnl = convert(optionPnL(t, tradesById), t.currency, currency, fxRates);
+      if (!map[strat]) map[strat] = { pnl: 0, count: 0 };
+      map[strat].pnl += pnl;
+      map[strat].count += 1;
+    }
+    return Object.entries(map).map(([strategy, v]) => ({ strategy, pnl: v.pnl, count: v.count })).sort((a, b) => b.pnl - a.pnl);
+  }, [realizedOptions, tradesById, currency, fxRates, activeGainsPeriod.start, todayStr]);
+
+  // ---------- TAE (rendimiento anualizado sobre el saldo medio ponderado) ----------
+  // Saldo medio ponderado = media del capital aportado (neto), ponderada por los días que
+  // estuvo en cada nivel durante el periodo — así un aporte reciente pesa menos que uno antiguo.
+  function weightedAvgBalance(points, startStr, endStr) {
+    const startVal = valueAsOf(points, startStr, "value");
+    const eventsInRange = points.filter((p) => p.date > startStr && p.date <= endStr);
+    const segments = [{ date: startStr, value: startVal }, ...eventsInRange];
+    let weightedSum = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const segStart = new Date(segments[i].date);
+      const segEnd = i + 1 < segments.length ? new Date(segments[i + 1].date) : new Date(endStr);
+      const days = Math.max(0, (segEnd - segStart) / 86400000);
+      weightedSum += segments[i].value * days;
+    }
+    const totalDays = Math.max(1, (new Date(endStr) - new Date(startStr)) / 86400000);
+    return weightedSum / totalDays;
+  }
+  const gainsPeriodDays = Math.max(1, Math.round((new Date(todayStr) - new Date(activeGainsPeriod.start)) / 86400000));
+  const gainsSaldoMedio = weightedAvgBalance(capitalPoints, activeGainsPeriod.start, todayStr);
+  const gainsSimpleReturnPct = gainsSaldoMedio > 0 ? gainsTotal / gainsSaldoMedio : null;
+  const gainsTAE = gainsSimpleReturnPct != null ? (Math.pow(1 + gainsSimpleReturnPct, 365 / gainsPeriodDays) - 1) * 100 : null;
+
+  // ---------- histórico mes a mes (mes en curso primero, hacia atrás) ----------
+  const monthlyGains = useMemo(() => {
+    const allDates = [...stockPnlPoints, ...optionPnlPoints, ...dividendPnlPoints].map((p) => p.date);
+    if (allDates.length === 0) return [];
+    const minDate = allDates.sort()[0];
+    const minD = new Date(minDate);
+    const months = [];
+    let cur = new Date(today.getFullYear(), today.getMonth(), 1);
+    const minMonth = new Date(minD.getFullYear(), minD.getMonth(), 1);
+    while (cur >= minMonth) {
+      const monthStartDate = new Date(cur);
+      const nextMonthDate = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+      const lastDayDate = new Date(nextMonthDate.getTime() - 86400000);
+      const monthStart = monthStartDate.toISOString().slice(0, 10);
+      const prevDay = new Date(monthStartDate.getTime() - 86400000).toISOString().slice(0, 10);
+      const lastDay = (lastDayDate > today ? today : lastDayDate).toISOString().slice(0, 10);
+      const stocksM = valueAsOf(stockPnlPoints, lastDay, "acumulado") - valueAsOf(stockPnlPoints, prevDay, "acumulado");
+      const optionsM = valueAsOf(optionPnlPoints, lastDay, "acumulado") - valueAsOf(optionPnlPoints, prevDay, "acumulado");
+      const dividendsM = valueAsOf(dividendPnlPoints, lastDay, "acumulado") - valueAsOf(dividendPnlPoints, prevDay, "acumulado");
+      months.push({
+        key: monthStart,
+        label: monthStartDate.toLocaleDateString("es-ES", { month: "long", year: "numeric" }),
+        stocks: stocksM, options: optionsM, dividends: dividendsM, total: stocksM + optionsM + dividendsM,
+      });
+      cur = new Date(cur.getFullYear(), cur.getMonth() - 1, 1);
+    }
+    return months;
+  }, [stockPnlPoints, optionPnlPoints, dividendPnlPoints]);
+
   // serie combinada de valor de cuenta (capital aportado + P&L realizado) para la gráfica
   const accountValueChart = useMemo(() => {
     const dates = Array.from(new Set([...capitalPoints.map((p) => p.date), ...realizedPoints.map((p) => p.date)])).sort();
@@ -1105,6 +1171,7 @@ export default function Dashboard({ session }) {
         )}
 
         {view === "gains" && (
+        <>
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Plusvalías / minusvalías por periodo</div>
@@ -1137,7 +1204,65 @@ export default function Dashboard({ session }) {
               <div className="card-sub">{activeGainsPeriod.label === "TODO" ? "desde el inicio" : `desde ${activeGainsPeriod.start}`}</div>
             </div>
           </div>
+
+          {gainsOptionsByStrategy.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <div className="field-label" style={{ marginBottom: 8 }}>Opciones — por estrategia</div>
+              <div className="cards">
+                {gainsOptionsByStrategy.map((g) => (
+                  <div className="card" key={g.strategy}>
+                    <div className="card-label">{g.strategy}</div>
+                    <div className="card-value" style={{ color: g.pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(g.pnl)}</div>
+                    <div className="card-sub">{g.count} operaci{g.count === 1 ? "ón" : "ones"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: 18 }}>
+            <div className="card" style={{ maxWidth: 320 }}>
+              <div className="card-label">TAE (anualizado, saldo medio ponderado)</div>
+              <div className="card-value big" style={{ color: gainsTAE == null ? "var(--muted)" : gainsTAE >= 0 ? "var(--gain)" : "var(--loss)" }}>
+                {gainsTAE == null ? "—" : `${gainsTAE >= 0 ? "+" : ""}${gainsTAE.toFixed(1)}%`}
+              </div>
+              <div className="card-sub">
+                {gainsSaldoMedio > 0 ? `sobre ${fmt(gainsSaldoMedio)} de saldo medio · ${gainsPeriodDays}d` : "sin capital aportado en este periodo"}
+              </div>
+            </div>
+          </div>
         </div>
+
+        <div className="panel">
+          <div className="panel-head"><div className="panel-title">Histórico mes a mes</div></div>
+          {monthlyGains.length === 0 ? <div className="empty">Sin datos suficientes aún</div> : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 480, overflowY: "auto" }}>
+              {monthlyGains.map((m) => (
+                <div key={m.key} className="panel" style={{ padding: "12px 16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div className="mono" style={{ fontSize: 13, color: "var(--gold)", textTransform: "capitalize" }}>{m.label}</div>
+                    <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: m.total >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(m.total)}</div>
+                  </div>
+                  <div className="cards" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                    <div>
+                      <div className="card-label">Acciones/ETF</div>
+                      <div className="mono" style={{ fontSize: 13, color: m.stocks >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(m.stocks)}</div>
+                    </div>
+                    <div>
+                      <div className="card-label">Opciones</div>
+                      <div className="mono" style={{ fontSize: 13, color: m.options >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmt(m.options)}</div>
+                    </div>
+                    <div>
+                      <div className="card-label">Dividendos</div>
+                      <div className="mono" style={{ fontSize: 13, color: m.dividends >= 0 ? "var(--gain)" : "var(--muted)" }}>{fmt(m.dividends)}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        </>
         )}
 
         {view === "byticker" && (
