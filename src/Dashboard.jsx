@@ -869,7 +869,12 @@ export default function Dashboard({ session }) {
     return best && bestDiff <= 5 * 86400000 ? best : null;
   }, [snapshots, activeGainsPeriod.start]);
   const dietzStartValue = valueAsOf(balancePoints, activeGainsPeriod.start, "value");
-  const dietzContributions = cashTx.filter((c) => c.date >= activeGainsPeriod.start && c.date <= todayStr);
+  // Las líneas de tarifas/retenciones/intereses (importadas del histórico) NO son aportaciones
+  // externas tuyas — son costes o ingresos de la propia inversión. Si las tratáramos como
+  // "aportación", distorsionarían el peso del cálculo de rendimiento (Dietz/TWR); en cambio, ya
+  // quedan reflejadas como parte del rendimiento porque siguen afectando el valor de la cuenta.
+  const isFeeLikeCashTx = (c) => /^(Tarifas de cuenta|Retenciones de impuestos|Intereses netos)/.test(c.notes || "");
+  const dietzContributions = cashTx.filter((c) => c.date >= activeGainsPeriod.start && c.date <= todayStr && !isFeeLikeCashTx(c));
   const dietzWeightedContrib = dietzContributions.reduce((s, c) => {
     const amt = convert(c.type === "deposit" ? c.amount : -c.amount, c.currency, currency, fxRates);
     const daysRemaining = Math.max(0, (new Date(todayStr) - new Date(c.date)) / 86400000);
