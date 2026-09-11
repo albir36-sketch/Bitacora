@@ -1289,7 +1289,7 @@ export default function Dashboard({ session }) {
           <div className="panel-head">
             <div className="panel-title">Plusvalías / minusvalías por periodo</div>
             <div className="tabs" style={{ flexWrap: "wrap" }}>
-              {PERIODS.map((p) => (
+              {PERIODS.filter((p) => p.id === "ytd" || p.id === "all").map((p) => (
                 <button key={p.id} className={`tab ${gainsPeriod === p.id ? "active" : ""}`} onClick={() => setGainsPeriod(p.id)}>{p.label}</button>
               ))}
             </div>
