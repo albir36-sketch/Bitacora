@@ -46,6 +46,86 @@ function computeYearRatios(y) {
   return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, roc, earningsYield, medias };
 }
 
+// ---------- criterios de cribado por "estilo de inversor" ----------
+// Cada función recibe los años ordenados (asc) + los ratios del último año + del precio actual
+// ("ahora"), y devuelve una lista de comprobaciones {label, pass, detail}.
+const INVESTORS = [
+  { id: "graham", label: "Benjamin Graham (inversor defensivo)" },
+  { id: "greenblatt", label: "Joel Greenblatt (Fórmula Mágica)" },
+  { id: "piotroski", label: "Piotroski (F-Score simplificado)" },
+  { id: "buffett", label: "Warren Buffett (calidad + poca deuda)" },
+];
+
+function evaluateGraham(years, nowRatios, livePrice) {
+  if (years.length === 0) return [];
+  const last = years[years.length - 1];
+  const lastR = computeYearRatios(last);
+  const checks = [];
+  checks.push({ label: "Ratio corriente ≥ 2", pass: lastR.fondoManiobra != null && lastR.fondoManiobra >= 2, detail: fmtNum(lastR.fondoManiobra, 2) });
+  const allProfitable = years.every((y) => (y.profit ?? 0) > 0);
+  checks.push({ label: `Beneficio positivo todos los años (${years.length})`, pass: allProfitable, detail: allProfitable ? "sí" : "no" });
+  const capitalCirculante = (last.current_assets || 0) - (last.current_liabilities || 0);
+  const deudaOk = (last.non_current_liabilities || 0) < capitalCirculante;
+  checks.push({ label: "Deuda largo plazo < capital circulante", pass: deudaOk, detail: `${fmtNum(last.non_current_liabilities || 0, 0)} vs ${fmtNum(capitalCirculante, 0)}` });
+  const per = nowRatios?.per ?? lastR.per;
+  checks.push({ label: "PER ≤ 15", pass: per != null && per > 0 && per <= 15, detail: fmtNum(per, 2) });
+  const pb = (livePrice != null && lastR.valorContableCon) ? livePrice / lastR.valorContableCon : null;
+  const grahamNumber = (per != null && pb != null) ? per * pb : null;
+  checks.push({ label: "PER × P/VC ≤ 22.5 (Número de Graham)", pass: grahamNumber != null && grahamNumber > 0 && grahamNumber <= 22.5, detail: fmtNum(grahamNumber, 1) });
+  checks.push({ label: "Paga dividendo", pass: (last.dividend_per_share || 0) > 0, detail: fmtNum(last.dividend_per_share || 0, 2) });
+  return checks;
+}
+
+function evaluateGreenblatt(years, nowRatios) {
+  if (years.length === 0) return [];
+  const r = nowRatios ?? computeYearRatios(years[years.length - 1]);
+  return [
+    { label: "ROC ≥ 15%", pass: r.roc != null && r.roc >= 15, detail: fmtPct(r.roc, 1) },
+    { label: "Earnings Yield ≥ 5%", pass: r.earningsYield != null && r.earningsYield >= 5, detail: fmtPct(r.earningsYield, 1) },
+  ];
+}
+
+function evaluatePiotroski(years) {
+  if (years.length < 2) return [{ label: "Hacen falta al menos 2 años guardados", pass: false, detail: "—" }];
+  const y1 = years[years.length - 2], y2 = years[years.length - 1]; // año anterior, último año
+  const totalAssets2 = (y2.current_assets || 0) + (y2.non_current_assets || 0);
+  const roa = totalAssets2 ? (y2.profit || 0) / totalAssets2 : null;
+  const r1 = computeYearRatios(y1), r2 = computeYearRatios(y2);
+  const checks = [
+    { label: "ROA positivo", pass: roa != null && roa > 0, detail: fmtPct((roa || 0) * 100, 1) },
+    { label: "Beneficio mejora vs año anterior", pass: (y2.profit || 0) > (y1.profit || 0), detail: `${fmtNum(y1.profit || 0, 0)} → ${fmtNum(y2.profit || 0, 0)}` },
+    { label: "Ratio corriente mejora", pass: (r2.fondoManiobra || 0) > (r1.fondoManiobra || 0), detail: `${fmtNum(r1.fondoManiobra, 2)} → ${fmtNum(r2.fondoManiobra, 2)}` },
+    { label: "% deuda sobre activos baja", pass: (r2.pctDeuda ?? 100) < (r1.pctDeuda ?? 100), detail: `${fmtNum(r1.pctDeuda, 1)}% → ${fmtNum(r2.pctDeuda, 1)}%` },
+    { label: "No hay dilución (nº acciones no sube)", pass: (y2.shares || 0) <= (y1.shares || 0), detail: `${fmtNum(y1.shares || 0, 0)} → ${fmtNum(y2.shares || 0, 0)}` },
+    { label: "Beneficio por acción mejora", pass: (y1.shares && y2.shares) ? (y2.profit / y2.shares) > (y1.profit / y1.shares) : false, detail: "" },
+  ];
+  return checks;
+}
+
+function evaluateBuffett(years, nowRatios) {
+  if (years.length === 0) return [];
+  const last = years[years.length - 1];
+  const r = nowRatios ?? computeYearRatios(last);
+  const equity = (last.current_assets || 0) + (last.non_current_assets || 0) - (last.current_liabilities || 0) - (last.non_current_liabilities || 0);
+  const roe = equity ? ((last.profit || 0) / equity) * 100 : null;
+  const profitGrowing = years.length >= 3 ? (last.profit || 0) > (years[0].profit || 0) : null;
+  return [
+    { label: "ROE ≥ 15%", pass: roe != null && roe >= 15, detail: fmtPct(roe, 1) },
+    { label: "% deuda sobre activos < 40%", pass: r.pctDeuda != null && r.pctDeuda < 40, detail: fmtPct(r.pctDeuda, 1) },
+    { label: `Beneficio creciente (vs ${years[0]?.year ?? "—"})`, pass: profitGrowing === true, detail: profitGrowing == null ? "faltan años" : (profitGrowing ? "sí" : "no") },
+  ];
+}
+
+function evaluateInvestor(investorId, years, nowRatios, livePrice) {
+  switch (investorId) {
+    case "graham": return evaluateGraham(years, nowRatios, livePrice);
+    case "greenblatt": return evaluateGreenblatt(years, nowRatios);
+    case "piotroski": return evaluatePiotroski(years);
+    case "buffett": return evaluateBuffett(years, nowRatios);
+    default: return [];
+  }
+}
+
 export default function Analysis({ session }) {
   const userId = session.user.id;
   const [companies, setCompanies] = useState([]);
@@ -53,6 +133,10 @@ export default function Analysis({ session }) {
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [investorFilter, setInvestorFilter] = useState("");
+  const [allYears, setAllYears] = useState({}); // companyId -> [años]
+  const [allPrices, setAllPrices] = useState({}); // companyId -> precio en vivo
+  const [screeningLoading, setScreeningLoading] = useState(false);
   const [livePrice, setLivePrice] = useState(null);
   const [priceLoading, setPriceLoading] = useState(false);
   const [showAddCompany, setShowAddCompany] = useState(false);
@@ -75,6 +159,31 @@ export default function Analysis({ session }) {
     const { data, error: err } = await supabase.from("company_analysis_years").select("*").eq("company_id", companyId).order("year");
     if (err) setError(err.message);
     setYears(data || []);
+  }
+
+  // Carga TODOS los años de TODAS las empresas de una vez (hace falta para poder cribar).
+  async function loadAllYearsForScreening() {
+    setScreeningLoading(true);
+    const { data, error: err } = await supabase.from("company_analysis_years").select("*").order("year");
+    if (err) { setError(err.message); setScreeningLoading(false); return; }
+    const grouped = {};
+    for (const row of data || []) {
+      if (!grouped[row.company_id]) grouped[row.company_id] = [];
+      grouped[row.company_id].push(row);
+    }
+    setAllYears(grouped);
+    setScreeningLoading(false);
+  }
+
+  async function refreshAllPrices() {
+    if (!FINNHUB_KEY) { setError("Falta configurar VITE_FINNHUB_API_KEY en Vercel."); return; }
+    setScreeningLoading(true);
+    const prices = {};
+    for (const c of companies) {
+      try { prices[c.id] = await fetchQuote(c.ticker); } catch (e) { /* se salta la que falle */ }
+    }
+    setAllPrices((prev) => ({ ...prev, ...prices }));
+    setScreeningLoading(false);
   }
 
   const selected = companies.find((c) => c.id === selectedId);
@@ -155,7 +264,28 @@ export default function Analysis({ session }) {
             <div className="panel-title">Análisis de empresas</div>
             <button className="btn btn-gold" style={{ padding: "6px 12px", fontSize: 13 }} onClick={() => setShowAddCompany(true)}><Plus size={14} /> Nueva empresa</button>
           </div>
-          {companies.length === 0 ? <div className="empty">Aún no has añadido ninguna empresa</div> : (
+
+          {companies.length > 0 && (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 18 }}>
+              <div className="field" style={{ minWidth: 260 }}>
+                <div className="field-label">Criba por criterios de inversor</div>
+                <select
+                  value={investorFilter}
+                  onChange={(e) => { setInvestorFilter(e.target.value); if (e.target.value) loadAllYearsForScreening(); }}
+                >
+                  <option value="">— Ninguno (ver todas) —</option>
+                  {INVESTORS.map((inv) => <option key={inv.id} value={inv.id}>{inv.label}</option>)}
+                </select>
+              </div>
+              {investorFilter && (
+                <button className="btn btn-ghost" style={{ padding: "8px 12px", fontSize: 13, marginTop: 18 }} onClick={refreshAllPrices} disabled={screeningLoading}>
+                  <RefreshCw size={14} /> {screeningLoading ? "Actualizando…" : "Actualizar precios (todas)"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {companies.length === 0 ? <div className="empty">Aún no has añadido ninguna empresa</div> : !investorFilter ? (
             <div className="cards">
               {companies.map((c) => (
                 <div key={c.id} className="card" style={{ cursor: "pointer" }} onClick={() => setSelectedId(c.id)}>
@@ -165,6 +295,14 @@ export default function Analysis({ session }) {
                 </div>
               ))}
             </div>
+          ) : (
+            <ScreeningList
+              companies={companies}
+              allYears={allYears}
+              allPrices={allPrices}
+              investorFilter={investorFilter}
+              onSelect={setSelectedId}
+            />
           )}
         </>
       ) : (
@@ -242,6 +380,58 @@ export default function Analysis({ session }) {
 
       {showAddCompany && <AddCompanyModal onCancel={() => setShowAddCompany(false)} onSave={addCompany} />}
       {showAddYear && <AddYearModal onCancel={() => setShowAddYear(false)} onSave={addYear} existingYears={years.map((y) => y.year)} />}
+    </div>
+  );
+}
+
+function ScreeningList({ companies, allYears, allPrices, investorFilter, onSelect }) {
+  const results = useMemo(() => {
+    return companies.map((c) => {
+      const years = (allYears[c.id] || []).slice().sort((a, b) => a.year - b.year);
+      const livePrice = allPrices[c.id];
+      const lastYear = years[years.length - 1];
+      let nowRatios = null;
+      if (lastYear) {
+        const shares = lastYear.shares || 0;
+        const cap = livePrice != null ? shares * livePrice : null;
+        nowRatios = computeYearRatios({ ...lastYear, year_end_price: null, market_cap: cap });
+      }
+      const checks = evaluateInvestor(investorFilter, years, nowRatios, livePrice);
+      const passed = checks.filter((ch) => ch.pass).length;
+      return { company: c, checks, passed, total: checks.length, nowRatios };
+    }).sort((a, b) => (b.total ? b.passed / b.total : 0) - (a.total ? a.passed / a.total : 0));
+  }, [companies, allYears, allPrices, investorFilter]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {results.map((r) => (
+        <div key={r.company.id} className="panel" style={{ padding: "12px 16px", cursor: "pointer" }} onClick={() => onSelect(r.company.id)}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: r.checks.length ? 8 : 0 }}>
+            <div>
+              <span style={{ fontWeight: 600 }}>{r.company.ticker}</span>
+              <span style={{ color: "var(--muted)", fontSize: 13, marginLeft: 8 }}>{r.company.company_name}</span>
+            </div>
+            <span
+              className="badge"
+              style={{
+                background: r.total === 0 ? "var(--panel2)" : r.passed === r.total ? "#132A22" : r.passed === 0 ? "#3A1A1A" : "#2A2410",
+                color: r.total === 0 ? "var(--muted)" : r.passed === r.total ? "var(--gain)" : r.passed === 0 ? "var(--loss)" : "var(--gold)",
+              }}
+            >
+              {r.total === 0 ? "Sin años guardados" : `Cumple ${r.passed}/${r.total}`}
+            </span>
+          </div>
+          {r.checks.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {r.checks.map((ch, i) => (
+                <span key={i} style={{ fontSize: 11, padding: "3px 8px", borderRadius: 4, background: ch.pass ? "#132A22" : "#3A1A1A", color: ch.pass ? "var(--gain)" : "var(--loss)" }}>
+                  {ch.pass ? "✓" : "✗"} {ch.label} ({ch.detail})
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
