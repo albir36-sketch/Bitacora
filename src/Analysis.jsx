@@ -3,6 +3,10 @@ import { Plus, X, Trash2, ArrowLeft, RefreshCw } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
+// Alto fijo (en px) de la fila de años en la cabecera de la tabla — se usa para calcular dónde
+// debe quedar pegada la fila de "Cotización cierre de año" justo debajo. Medirlo en tiempo real
+// resultó poco fiable, así que usamos un valor fijo generoso.
+const YEARS_ROW_HEIGHT = 34;
 
 async function fetchQuote(ticker) {
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${FINNHUB_KEY}`);
@@ -153,8 +157,6 @@ export default function Analysis({ session }) {
   const [showAllYears, setShowAllYears] = useState(false);
   const cardsRef = useRef(null);
   const [cardsHeight, setCardsHeight] = useState(0);
-  const yearsRowRef = useRef(null);
-  const [yearsRowHeight, setYearsRowHeight] = useState(0);
   const [priceLoading, setPriceLoading] = useState(false);
   const [showAddCompany, setShowAddCompany] = useState(false);
   const [showAddYear, setShowAddYear] = useState(false);
@@ -172,16 +174,6 @@ export default function Analysis({ session }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, [selectedId]);
-
-  useEffect(() => {
-    if (!yearsRowRef.current) return;
-    const el = yearsRowRef.current;
-    const update = () => setYearsRowHeight(el.offsetHeight);
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [selectedId, showAllYears]);
 
   async function loadCompanies() {
     setLoading(true);
@@ -403,7 +395,7 @@ export default function Analysis({ session }) {
               <div style={{ overflowX: "visible" }}>
                 <table>
                   <thead>
-                    <tr ref={yearsRowRef}>
+                    <tr>
                       <th style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>Métrica</th>
                       {visibleYears.map((y) => (
                         <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>{y.year}</th>
@@ -411,11 +403,11 @@ export default function Analysis({ session }) {
                       <th className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)", color: "var(--gold)" }}>AHORA</th>
                     </tr>
                     <tr>
-                      <th style={{ position: "sticky", top: cardsHeight + yearsRowHeight, zIndex: 10, background: "var(--panel)", fontWeight: 400, color: "var(--muted)" }}>Cotización cierre de año</th>
+                      <th style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", fontWeight: 400, color: "var(--muted)" }}>Cotización cierre de año</th>
                       {visibleYears.map((y) => (
-                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight + yearsRowHeight, zIndex: 10, background: "var(--panel)", fontWeight: 400 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</th>
+                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", fontWeight: 400 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</th>
                       ))}
-                      <th className="mono" style={{ position: "sticky", top: cardsHeight + yearsRowHeight, zIndex: 10, background: "var(--panel)", color: "var(--gold)", fontWeight: 400 }}>{livePrice != null ? fmtNum(livePrice, 2) : "—"}</th>
+                      <th className="mono" style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", color: "var(--gold)", fontWeight: 400 }}>{livePrice != null ? fmtNum(livePrice, 2) : "—"}</th>
                     </tr>
                   </thead>
                   <tbody>
