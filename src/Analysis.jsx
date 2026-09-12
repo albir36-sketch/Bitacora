@@ -424,7 +424,10 @@ export default function Analysis({ session }) {
                     <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} trend="up" />
                     <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} />
                     <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
-                    <ComputedRow label="Número de Graham" years={visibleYears} calcKey="grahamNumber" nowData={nowData} decimals={2} />
+                    <ComputedRow
+                      label="Número de Graham" years={visibleYears} calcKey="grahamNumber" nowData={nowData} decimals={2}
+                      tooltip="Precio máximo razonable según Benjamin Graham: √(22,5 × Beneficio por acción × Valor contable por acción). Pagar por encima de este precio implica un PER y un Precio/Valor contable combinados más altos de lo que él consideraba prudente para un inversor defensivo."
+                    />
                     <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} trend="up" />
                     <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} trend="down" />
                     <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
@@ -677,10 +680,15 @@ function RawRow({ label, years, field, onDelete, decimals = 0, trend, muted }) {
   );
 }
 
-function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend, thresholds }) {
+function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend, thresholds, tooltip }) {
   return (
     <tr>
-      <td style={{ color: highlight ? "var(--gold)" : "var(--muted)", fontWeight: bold ? 700 : 400 }}>{label}</td>
+      <td
+        style={{ color: highlight ? "var(--gold)" : "var(--muted)", fontWeight: bold ? 700 : 400, cursor: tooltip ? "help" : undefined, textDecoration: tooltip ? "underline dotted" : undefined }}
+        title={tooltip}
+      >
+        {label}
+      </td>
       {years.map((y, i) => {
         const v = computeYearRatios(y)[calcKey];
         const prev = i > 0 ? computeYearRatios(years[i - 1])[calcKey] : null;
