@@ -465,11 +465,14 @@ function ShoppingList({ companies, allPrices, onSelect }) {
         const price = allPrices[c.id];
         const diff1 = (price != null && c.target1) ? ((c.target1 - price) / price) * 100 : null;
         const diff2 = (price != null && c.target2) ? ((c.target2 - price) / price) * 100 : null;
+        // cuánto está el precio POR ENCIMA del objetivo (como % del objetivo) — para los colores
+        const above1 = (price != null && c.target1) ? ((price - c.target1) / c.target1) * 100 : null;
+        const above2 = (price != null && c.target2) ? ((price - c.target2) / c.target2) * 100 : null;
         const buy1 = price != null && c.target1 != null && price <= c.target1;
         const buy2 = price != null && c.target2 != null && price <= c.target2;
         const almost1 = price != null && c.target1 != null && !buy1 && price <= c.target1 * 1.05;
         const almost2 = price != null && c.target2 != null && !buy2 && price <= c.target2 * 1.05;
-        return { company: c, price, diff1, diff2, buy1, buy2, almost1, almost2 };
+        return { company: c, price, diff1, diff2, above1, above2, buy1, buy2, almost1, almost2 };
       })
       .sort((a, b) => {
         const score = (r) => (r.buy2 ? 3 : r.buy1 ? 2 : r.almost2 || r.almost1 ? 1 : 0);
@@ -485,6 +488,15 @@ function ShoppingList({ companies, allPrices, onSelect }) {
     const bg = buy ? "#132A22" : almost ? "#2A2410" : "var(--panel2)";
     const color = buy ? "var(--gain)" : almost ? "var(--gold)" : "var(--muted)";
     return <span className="badge" style={{ background: bg, color }}>{buy ? "SÍ" : almost ? "Casi" : "No"} · {label}</span>;
+  }
+
+  // verde: precio a lo sumo un 5% por encima del objetivo (o ya por debajo). amarillo: 5-20% por
+  // encima. rojo: más de un 20% por encima.
+  function diffColor(above) {
+    if (above == null) return "var(--muted)";
+    if (above <= 5) return "var(--gain)";
+    if (above <= 20) return "var(--gold)";
+    return "var(--loss)";
   }
 
   return (
@@ -506,17 +518,17 @@ function ShoppingList({ companies, allPrices, onSelect }) {
               </td>
               <td className="mono">{r.price != null ? fmtNum(r.price, 2) : "—"}</td>
               <td className="mono">{r.company.target1 != null ? fmtNum(r.company.target1, 2) : "—"}</td>
-              <td className="mono" style={{ color: r.diff1 == null ? "var(--muted)" : r.diff1 <= 0 ? "var(--gain)" : "var(--loss)" }}>{r.diff1 != null ? `${r.diff1 >= 0 ? "+" : ""}${r.diff1.toFixed(1)}%` : "—"}</td>
+              <td className="mono" style={{ color: diffColor(r.above1) }}>{r.diff1 != null ? `${r.diff1 >= 0 ? "+" : ""}${r.diff1.toFixed(1)}%` : "—"}</td>
               <td>{r.company.target1 != null && <Flag buy={r.buy1} almost={r.almost1} label="mod." />}</td>
               <td className="mono">{r.company.target2 != null ? fmtNum(r.company.target2, 2) : "—"}</td>
-              <td className="mono" style={{ color: r.diff2 == null ? "var(--muted)" : r.diff2 <= 0 ? "var(--gain)" : "var(--loss)" }}>{r.diff2 != null ? `${r.diff2 >= 0 ? "+" : ""}${r.diff2.toFixed(1)}%` : "—"}</td>
+              <td className="mono" style={{ color: diffColor(r.above2) }}>{r.diff2 != null ? `${r.diff2 >= 0 ? "+" : ""}${r.diff2.toFixed(1)}%` : "—"}</td>
               <td>{r.company.target2 != null && <Flag buy={r.buy2} almost={r.almost2} label="fuerte" />}</td>
             </tr>
           ))}
         </tbody>
       </table>
       <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-        "Dif. %" es cuánto está el objetivo por encima (+) o por debajo (−) del precio actual. "SÍ" = el precio ya está en o por debajo del objetivo. "Casi" = está hasta un 5% por encima.
+        "Dif. %" es cuánto está el objetivo por encima (+) o por debajo (−) del precio actual. Verde: el precio está como mucho un 5% por encima del objetivo. Amarillo: entre un 5% y un 20% por encima. Rojo: más de un 20% por encima. "SÍ" = el precio ya está en o por debajo del objetivo. "Casi" = está hasta un 5% por encima.
       </div>
     </div>
   );
