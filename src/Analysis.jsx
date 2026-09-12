@@ -3,10 +3,6 @@ import { Plus, X, Trash2, ArrowLeft, RefreshCw } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
-// Alto fijo (en px) de la fila de años en la cabecera de la tabla — se usa para calcular dónde
-// debe quedar pegada la fila de "Cotización cierre de año" justo debajo. Medirlo en tiempo real
-// resultó poco fiable, así que usamos un valor fijo generoso.
-const YEARS_ROW_HEIGHT = 44;
 
 async function fetchQuote(ticker) {
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${FINNHUB_KEY}`);
@@ -396,15 +392,15 @@ export default function Analysis({ session }) {
                 <table>
                   <thead>
                     <tr>
-                      <th style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>Métrica</th>
+                      <th style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>
+                        Métrica
+                        <div style={{ fontWeight: 400, marginTop: 4 }}>Cotización cierre de año</div>
+                      </th>
                       {visibleYears.map((y) => (
-                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>{y.year}</th>
-                      ))}
-                    </tr>
-                    <tr>
-                      <th style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", fontWeight: 400, color: "var(--muted)" }}>Cotización cierre de año</th>
-                      {visibleYears.map((y) => (
-                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", fontWeight: 400 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</th>
+                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>
+                          <div>{y.year}</div>
+                          <div style={{ fontWeight: 400, color: "var(--muted)", marginTop: 4 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</div>
+                        </th>
                       ))}
                     </tr>
                   </thead>
