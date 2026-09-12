@@ -405,7 +405,11 @@ export default function Analysis({ session }) {
                     </tr>
                   </thead>
                   <tbody>
-                    <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} />
+                    <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} trend="up" />
+                    <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} />
+                    <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
+                    <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} trend="up" />
+                    <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} trend="down" />
                     <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
                     <RawRow label="Intangibles" years={visibleYears} field="intangibles" onDelete={deleteYear} />
                     <RawRow label="Activo no corriente" years={visibleYears} field="non_current_assets" onDelete={deleteYear} />
@@ -416,10 +420,6 @@ export default function Analysis({ session }) {
                     <RawRow label="Pasivo corriente" years={visibleYears} field="current_liabilities" onDelete={deleteYear} />
                     <RawRow label="Beneficio" years={visibleYears} field="profit" onDelete={deleteYear} />
                     <RawRow label="Dividendo/acción" years={visibleYears} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
-                    <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} />
-                    <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} />
-                    <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
-                    <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} />
                     <RawRow label="EBIT" years={visibleYears} field="ebit" onDelete={deleteYear} />
                     <ComputedRow label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight />
                     <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight />
@@ -550,26 +550,42 @@ function ScreeningList({ companies, allYears, allPrices, investorFilter, onSelec
   );
 }
 
-function RawRow({ label, years, field, onDelete, decimals = 0, nowValue }) {
+// trend: "up" = subir respecto al año anterior es mejora (verde); "down" = bajar es mejora (verde)
+function trendColor(curr, prev, trend) {
+  if (!trend || curr == null || prev == null || prev === curr) return undefined;
+  const improved = trend === "up" ? curr > prev : curr < prev;
+  return improved ? "var(--gain)" : "var(--loss)";
+}
+
+function RawRow({ label, years, field, onDelete, decimals = 0, trend }) {
   return (
     <tr>
       <td style={{ color: "var(--muted)" }}>{label}</td>
-      {years.map((y) => (
-        <td key={y.id} className="mono">
-          {y[field] != null ? fmtNum(y[field], decimals) : "—"}
-        </td>
-      ))}
+      {years.map((y, i) => {
+        const v = y[field];
+        const prev = i > 0 ? years[i - 1][field] : null;
+        return (
+          <td key={y.id} className="mono" style={{ color: trendColor(v, prev, trend) }}>
+            {v != null ? fmtNum(v, decimals) : "—"}
+          </td>
+        );
+      })}
     </tr>
   );
 }
 
-function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold }) {
+function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend }) {
   return (
     <tr>
       <td style={{ color: highlight ? "var(--gold)" : "var(--muted)", fontWeight: bold ? 700 : 400 }}>{label}</td>
-      {years.map((y) => {
+      {years.map((y, i) => {
         const v = computeYearRatios(y)[calcKey];
-        return <td key={y.id} className="mono" style={{ fontWeight: bold ? 700 : 400 }}>{isPct ? fmtPct(v, decimals) : fmtNum(v, decimals)}</td>;
+        const prev = i > 0 ? computeYearRatios(years[i - 1])[calcKey] : null;
+        return (
+          <td key={y.id} className="mono" style={{ fontWeight: bold ? 700 : 400, color: trendColor(v, prev, trend) }}>
+            {isPct ? fmtPct(v, decimals) : fmtNum(v, decimals)}
+          </td>
+        );
       })}
     </tr>
   );
