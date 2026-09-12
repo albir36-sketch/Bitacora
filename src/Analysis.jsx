@@ -36,6 +36,12 @@ function computeYearRatios(y) {
   const valorContableCon = shares ? (ac + anc - pc - pnc) / shares : null;
   const per = (cap != null && profit) ? cap / profit : null;
   const cotizacionPER10 = shares ? (profit / shares) * 10 : null;
+  // Número de Graham: √(22.5 × BPA × Valor contable por acción). Solo tiene sentido con beneficio
+  // y valor contable positivos (si alguno es negativo o cero, la raíz no da un precio real).
+  const bpa = shares ? profit / shares : null;
+  const grahamNumber = (bpa != null && bpa > 0 && valorContableSin != null && valorContableSin > 0)
+    ? Math.sqrt(22.5 * bpa * valorContableSin)
+    : null;
   const nwc = ac - pc;
   const netFixedAssets = anc - intang;
   const roc = (ebit != null && (nwc + netFixedAssets) !== 0) ? (ebit / (nwc + netFixedAssets)) * 100 : null;
@@ -43,7 +49,7 @@ function computeYearRatios(y) {
   const earningsYield = (ebit != null && ev) ? (ebit / ev) * 100 : null;
   const medias = (roc != null && earningsYield != null) ? (roc + earningsYield) / 2 : null;
 
-  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, roc, earningsYield, medias };
+  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, grahamNumber, roc, earningsYield, medias };
 }
 
 // ---------- criterios de cribado por "estilo de inversor" ----------
@@ -418,6 +424,7 @@ export default function Analysis({ session }) {
                     <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} trend="up" />
                     <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} />
                     <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
+                    <ComputedRow label="Número de Graham" years={visibleYears} calcKey="grahamNumber" nowData={nowData} decimals={2} />
                     <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} trend="up" />
                     <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} trend="down" />
                     <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
