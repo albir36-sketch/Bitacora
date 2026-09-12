@@ -146,6 +146,7 @@ export default function Analysis({ session }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [investorFilter, setInvestorFilter] = useState("");
+  const [showShoppingList, setShowShoppingList] = useState(false);
   const [allYears, setAllYears] = useState({}); // companyId -> [años]
   const [allPrices, setAllPrices] = useState({}); // companyId -> precio en vivo
   const [screeningLoading, setScreeningLoading] = useState(false);
@@ -296,13 +297,20 @@ export default function Analysis({ session }) {
                 <div className="field-label">Criba por criterios de inversor</div>
                 <select
                   value={investorFilter}
-                  onChange={(e) => { setInvestorFilter(e.target.value); if (e.target.value) loadAllYearsForScreening(); }}
+                  onChange={(e) => { setInvestorFilter(e.target.value); setShowShoppingList(false); if (e.target.value) loadAllYearsForScreening(); }}
                 >
                   <option value="">— Ninguno (ver todas) —</option>
                   {INVESTORS.map((inv) => <option key={inv.id} value={inv.id}>{inv.label}</option>)}
                 </select>
               </div>
-              {investorFilter && (
+              <button
+                className={`btn ${showShoppingList ? "btn-gold" : "btn-ghost"}`}
+                style={{ padding: "8px 12px", fontSize: 13, marginTop: 18 }}
+                onClick={() => { setShowShoppingList((v) => !v); setInvestorFilter(""); }}
+              >
+                Lista de la compra
+              </button>
+              {(investorFilter || showShoppingList) && (
                 <button className="btn btn-ghost" style={{ padding: "8px 12px", fontSize: 13, marginTop: 18 }} onClick={refreshAllPrices} disabled={screeningLoading}>
                   <RefreshCw size={14} /> {screeningLoading ? "Actualizando…" : "Actualizar precios (todas)"}
                 </button>
@@ -310,7 +318,9 @@ export default function Analysis({ session }) {
             </div>
           )}
 
-          {companies.length === 0 ? <div className="empty">Aún no has añadido ninguna empresa</div> : !investorFilter ? (
+          {companies.length === 0 ? <div className="empty">Aún no has añadido ninguna empresa</div> : showShoppingList ? (
+            <ShoppingList companies={companies} allPrices={allPrices} onSelect={setSelectedId} />
+          ) : !investorFilter ? (
             <div className="cards">
               {companies.map((c) => (
                 <div key={c.id} className="card" style={{ cursor: "pointer" }} onClick={() => setSelectedId(c.id)}>
@@ -443,6 +453,71 @@ export default function Analysis({ session }) {
 
       {showAddCompany && <AddCompanyModal onCancel={() => setShowAddCompany(false)} onSave={addCompany} />}
       {showAddYear && <AddYearModal onCancel={() => setShowAddYear(false)} onSave={addYear} existingYears={years.map((y) => y.year)} />}
+    </div>
+  );
+}
+
+function ShoppingList({ companies, allPrices, onSelect }) {
+  const rows = useMemo(() => {
+    return companies
+      .filter((c) => c.target1 != null || c.target2 != null)
+      .map((c) => {
+        const price = allPrices[c.id];
+        const diff1 = (price != null && c.target1) ? ((c.target1 - price) / price) * 100 : null;
+        const diff2 = (price != null && c.target2) ? ((c.target2 - price) / price) * 100 : null;
+        const buy1 = price != null && c.target1 != null && price <= c.target1;
+        const buy2 = price != null && c.target2 != null && price <= c.target2;
+        const almost1 = price != null && c.target1 != null && !buy1 && price <= c.target1 * 1.05;
+        const almost2 = price != null && c.target2 != null && !buy2 && price <= c.target2 * 1.05;
+        return { company: c, price, diff1, diff2, buy1, buy2, almost1, almost2 };
+      })
+      .sort((a, b) => {
+        const score = (r) => (r.buy2 ? 3 : r.buy1 ? 2 : r.almost2 || r.almost1 ? 1 : 0);
+        return score(b) - score(a);
+      });
+  }, [companies, allPrices]);
+
+  if (rows.length === 0) {
+    return <div className="empty">Ninguna empresa tiene Objetivo 1 u Objetivo 2 rellenado todavía — entra en cada una y ponle un precio objetivo.</div>;
+  }
+
+  function Flag({ buy, almost, label }) {
+    const bg = buy ? "#132A22" : almost ? "#2A2410" : "var(--panel2)";
+    const color = buy ? "var(--gain)" : almost ? "var(--gold)" : "var(--muted)";
+    return <span className="badge" style={{ background: bg, color }}>{buy ? "SÍ" : almost ? "Casi" : "No"} · {label}</span>;
+  }
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Empresa</th><th>Precio actual</th>
+            <th>Objetivo 1</th><th>Dif. %</th><th></th>
+            <th>Objetivo 2</th><th>Dif. %</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.company.id} style={{ cursor: "pointer" }} onClick={() => onSelect(r.company.id)}>
+              <td>
+                <span style={{ fontWeight: 600 }}>{r.company.ticker}</span>
+                <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>{r.company.company_name}</span>
+              </td>
+              <td className="mono">{r.price != null ? fmtNum(r.price, 2) : "—"}</td>
+              <td className="mono">{r.company.target1 != null ? fmtNum(r.company.target1, 2) : "—"}</td>
+              <td className="mono" style={{ color: r.diff1 == null ? "var(--muted)" : r.diff1 <= 0 ? "var(--gain)" : "var(--loss)" }}>{r.diff1 != null ? `${r.diff1 >= 0 ? "+" : ""}${r.diff1.toFixed(1)}%` : "—"}</td>
+              <td>{r.company.target1 != null && <Flag buy={r.buy1} almost={r.almost1} label="mod." />}</td>
+              <td className="mono">{r.company.target2 != null ? fmtNum(r.company.target2, 2) : "—"}</td>
+              <td className="mono" style={{ color: r.diff2 == null ? "var(--muted)" : r.diff2 <= 0 ? "var(--gain)" : "var(--loss)" }}>{r.diff2 != null ? `${r.diff2 >= 0 ? "+" : ""}${r.diff2.toFixed(1)}%` : "—"}</td>
+              <td>{r.company.target2 != null && <Flag buy={r.buy2} almost={r.almost2} label="fuerte" />}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
+        "Dif. %" es cuánto está el objetivo por encima (+) o por debajo (−) del precio actual. "SÍ" = el precio ya está en o por debajo del objetivo. "Casi" = está hasta un 5% por encima.
+      </div>
     </div>
   );
 }
