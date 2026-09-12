@@ -357,9 +357,9 @@ export default function Analysis({ session }) {
             style={{ marginBottom: 0, position: "sticky", top: 0, zIndex: 20, background: "var(--panel)", paddingTop: 8, paddingBottom: 12 }}
           >
             <TargetCard label="Precio ahora" value={livePrice} currency={selected.currency} editable={false} />
-            <TargetCard label="Objetivo 1" value={selected.target1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target1: v })} />
-            <TargetCard label="Objetivo 2" value={selected.target2} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target2: v })} />
-            <TargetCard label="Venta 1" value={selected.sell1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { sell1: v })} />
+            <TargetCard label="Objetivo 1" value={selected.target1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target1: v })} note={selected.target1_note} onSaveNote={(n) => updateCompany(selected.id, { target1_note: n })} />
+            <TargetCard label="Objetivo 2" value={selected.target2} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target2: v })} note={selected.target2_note} onSaveNote={(n) => updateCompany(selected.id, { target2_note: n })} />
+            <TargetCard label="Venta 1" value={selected.sell1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { sell1: v })} note={selected.sell1_note} onSaveNote={(n) => updateCompany(selected.id, { sell1_note: n })} />
             <div className="card">
               <div className="card-label">Sector</div>
               <select
@@ -601,10 +601,15 @@ function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, high
   );
 }
 
-function TargetCard({ label, value, currency, onSave, editable = true }) {
+function TargetCard({ label, value, currency, onSave, editable = true, note, onSaveNote }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value ?? "");
   useEffect(() => { setVal(value ?? ""); }, [value]);
+
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteVal, setNoteVal] = useState(note ?? "");
+  useEffect(() => { setNoteVal(note ?? ""); }, [note]);
+
   return (
     <div className="card">
       <div className="card-label">{label}</div>
@@ -619,6 +624,35 @@ function TargetCard({ label, value, currency, onSave, editable = true }) {
         </div>
       )}
       <div className="card-sub">{currency}{editable && !editing ? " · clic para editar" : ""}</div>
+
+      {onSaveNote && (
+        editingNote ? (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            <textarea
+              value={noteVal}
+              onChange={(e) => setNoteVal(e.target.value)}
+              placeholder="¿Por qué este precio?"
+              rows={2}
+              style={{ width: "100%", resize: "vertical", fontSize: 12, fontFamily: "inherit" }}
+              autoFocus
+            />
+            <button
+              className="btn btn-ghost"
+              style={{ padding: "4px 10px", fontSize: 11, alignSelf: "flex-start" }}
+              onClick={() => { onSaveNote(noteVal === "" ? null : noteVal); setEditingNote(false); }}
+            >
+              Guardar nota
+            </button>
+          </div>
+        ) : (
+          <div
+            style={{ marginTop: 8, fontSize: 11, color: note ? "var(--text)" : "var(--muted)", cursor: "pointer", fontStyle: note ? "normal" : "italic" }}
+            onClick={() => setEditingNote(true)}
+          >
+            {note || "+ añadir observación"}
+          </div>
+        )
+      )}
     </div>
   );
 }
