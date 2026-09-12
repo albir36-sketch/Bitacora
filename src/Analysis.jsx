@@ -685,13 +685,24 @@ function TargetCard({ label, value, currency, onSave, editable = true, note, onS
   const [noteVal, setNoteVal] = useState(note ?? "");
   useEffect(() => { setNoteVal(note ?? ""); }, [note]);
 
+  function commitValue() {
+    onSave(val === "" ? null : Number(val));
+    setEditing(false);
+  }
+
   return (
     <div className="card">
       <div className="card-label">{label}</div>
       {editable && editing ? (
         <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-          <input type="number" className="price-input" style={{ width: "100%" }} value={val} onChange={(e) => setVal(e.target.value)} autoFocus />
-          <button className="icon-btn" style={{ color: "var(--gain)" }} onClick={() => { onSave(val === "" ? null : Number(val)); setEditing(false); }}>✓</button>
+          <input
+            type="number" className="price-input" style={{ width: "100%" }} value={val}
+            onChange={(e) => setVal(e.target.value)}
+            onBlur={commitValue}
+            onKeyDown={(e) => { if (e.key === "Enter") commitValue(); if (e.key === "Escape") { setVal(value ?? ""); setEditing(false); } }}
+            autoFocus
+          />
+          <button className="icon-btn" style={{ color: "var(--gain)" }} onMouseDown={(e) => e.preventDefault()} onClick={commitValue}>✓</button>
         </div>
       ) : (
         <div className="card-value" style={{ cursor: editable ? "pointer" : "default" }} onClick={() => editable && setEditing(true)}>
@@ -706,6 +717,7 @@ function TargetCard({ label, value, currency, onSave, editable = true, note, onS
             <textarea
               value={noteVal}
               onChange={(e) => setNoteVal(e.target.value)}
+              onBlur={() => { onSaveNote(noteVal === "" ? null : noteVal); setEditingNote(false); }}
               placeholder="¿Por qué este precio?"
               rows={2}
               style={{ width: "100%", resize: "vertical", fontSize: 12, fontFamily: "inherit" }}
@@ -714,6 +726,7 @@ function TargetCard({ label, value, currency, onSave, editable = true, note, onS
             <button
               className="btn btn-ghost"
               style={{ padding: "4px 10px", fontSize: 11, alignSelf: "flex-start" }}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => { onSaveNote(noteVal === "" ? null : noteVal); setEditingNote(false); }}
             >
               Guardar nota
