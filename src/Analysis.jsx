@@ -402,14 +402,14 @@ export default function Analysis({ session }) {
                 <table>
                   <thead>
                     <tr>
-                      <th style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>
+                      <th style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)", fontSize: 13 }}>
                         Métrica
-                        <div style={{ fontWeight: 400, marginTop: 4 }}>Cotización cierre de año</div>
+                        <div style={{ fontWeight: 400, marginTop: 4, fontSize: 12 }}>Cotización cierre de año</div>
                       </th>
                       {visibleYears.map((y) => (
-                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>
+                        <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)", fontSize: 15 }}>
                           <div>{y.year}</div>
-                          <div style={{ fontWeight: 400, color: "var(--muted)", marginTop: 4 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</div>
+                          <div style={{ fontWeight: 400, color: "var(--muted)", marginTop: 4, fontSize: 13 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</div>
                         </th>
                       ))}
                     </tr>
