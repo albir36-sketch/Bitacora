@@ -6,7 +6,7 @@ const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
 // Alto fijo (en px) de la fila de años en la cabecera de la tabla — se usa para calcular dónde
 // debe quedar pegada la fila de "Cotización cierre de año" justo debajo. Medirlo en tiempo real
 // resultó poco fiable, así que usamos un valor fijo generoso.
-const YEARS_ROW_HEIGHT = 34;
+const YEARS_ROW_HEIGHT = 44;
 
 async function fetchQuote(ticker) {
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${FINNHUB_KEY}`);
@@ -400,19 +400,16 @@ export default function Analysis({ session }) {
                       {visibleYears.map((y) => (
                         <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>{y.year}</th>
                       ))}
-                      <th className="mono" style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)", color: "var(--gold)" }}>AHORA</th>
                     </tr>
                     <tr>
                       <th style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", fontWeight: 400, color: "var(--muted)" }}>Cotización cierre de año</th>
                       {visibleYears.map((y) => (
                         <th key={y.id} className="mono" style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", fontWeight: 400 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</th>
                       ))}
-                      <th className="mono" style={{ position: "sticky", top: cardsHeight + YEARS_ROW_HEIGHT, zIndex: 10, background: "var(--panel)", color: "var(--gold)", fontWeight: 400 }}>{livePrice != null ? fmtNum(livePrice, 2) : "—"}</th>
                     </tr>
                   </thead>
                   <tbody>
                     <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} />
-                    <ComputedRow label="AC−(PC+PNC)" years={visibleYears} calcKey="acMenosPasivos" nowData={nowData} />
                     <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
                     <RawRow label="Intangibles" years={visibleYears} field="intangibles" onDelete={deleteYear} />
                     <RawRow label="Activo no corriente" years={visibleYears} field="non_current_assets" onDelete={deleteYear} />
@@ -566,7 +563,6 @@ function RawRow({ label, years, field, onDelete, decimals = 0, nowValue }) {
           {y[field] != null ? fmtNum(y[field], decimals) : "—"}
         </td>
       ))}
-      <td className="mono" style={{ color: "var(--gold)" }}>{nowValue != null ? fmtNum(nowValue, decimals) : "—"}</td>
     </tr>
   );
 }
@@ -579,9 +575,6 @@ function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, high
         const v = computeYearRatios(y)[calcKey];
         return <td key={y.id} className="mono" style={{ fontWeight: bold ? 700 : 400 }}>{isPct ? fmtPct(v, decimals) : fmtNum(v, decimals)}</td>;
       })}
-      <td className="mono" style={{ color: "var(--gold)", fontWeight: 700 }}>
-        {nowData ? (isPct ? fmtPct(nowData[calcKey], decimals) : fmtNum(nowData[calcKey], decimals)) : "—"}
-      </td>
     </tr>
   );
 }
