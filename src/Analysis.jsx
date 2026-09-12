@@ -411,16 +411,16 @@ export default function Analysis({ session }) {
                     <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} trend="up" />
                     <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} trend="down" />
                     <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
-                    <RawRow label="Intangibles" years={visibleYears} field="intangibles" onDelete={deleteYear} />
-                    <RawRow label="Activo no corriente" years={visibleYears} field="non_current_assets" onDelete={deleteYear} />
-                    <ComputedRow label="Fondo de maniobra" years={visibleYears} calcKey="fondoManiobra" nowData={nowData} decimals={2} />
+                    <RawRow label="Intangibles" years={visibleYears} field="intangibles" onDelete={deleteYear} trend="down" />
+                    <RawRow label="Activo no corriente" years={visibleYears} field="non_current_assets" onDelete={deleteYear} muted />
+                    <ComputedRow label="Fondo de maniobra" years={visibleYears} calcKey="fondoManiobra" nowData={nowData} decimals={2} thresholds={{ good: 1.5, bad: 1 }} />
                     <RawRow label="Activo corriente" years={visibleYears} field="current_assets" onDelete={deleteYear} />
-                    <RawRow label="Pasivo no corriente" years={visibleYears} field="non_current_liabilities" onDelete={deleteYear} />
+                    <RawRow label="Pasivo no corriente" years={visibleYears} field="non_current_liabilities" onDelete={deleteYear} muted />
                     <ComputedRow label="% Deuda sobre activos" years={visibleYears} calcKey="pctDeuda" nowData={nowData} isPct />
                     <RawRow label="Pasivo corriente" years={visibleYears} field="current_liabilities" onDelete={deleteYear} />
-                    <RawRow label="Beneficio" years={visibleYears} field="profit" onDelete={deleteYear} />
+                    <RawRow label="Beneficio" years={visibleYears} field="profit" onDelete={deleteYear} trend="up" />
                     <RawRow label="Dividendo/acción" years={visibleYears} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
-                    <RawRow label="EBIT" years={visibleYears} field="ebit" onDelete={deleteYear} />
+                    <RawRow label="EBIT" years={visibleYears} field="ebit" onDelete={deleteYear} trend="up" />
                     <ComputedRow label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight />
                     <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight />
                     <ComputedRow label="Media (Fórmula Mágica)" years={visibleYears} calcKey="medias" nowData={nowData} isPct highlight bold />
@@ -556,16 +556,25 @@ function trendColor(curr, prev, trend) {
   const improved = trend === "up" ? curr > prev : curr < prev;
   return improved ? "var(--gain)" : "var(--loss)";
 }
+// thresholds: {good: n, bad: n} — por encima de "good" = verde, por debajo de "bad" = rojo
+function thresholdColor(v, thresholds) {
+  if (!thresholds || v == null) return undefined;
+  if (v >= thresholds.good) return "var(--gain)";
+  if (v < thresholds.bad) return "var(--loss)";
+  return undefined;
+}
+const SOFT_GRAY = "#9AA5B8";
 
-function RawRow({ label, years, field, onDelete, decimals = 0, trend }) {
+function RawRow({ label, years, field, onDelete, decimals = 0, trend, muted }) {
   return (
     <tr>
       <td style={{ color: "var(--muted)" }}>{label}</td>
       {years.map((y, i) => {
         const v = y[field];
         const prev = i > 0 ? years[i - 1][field] : null;
+        const color = muted ? SOFT_GRAY : trendColor(v, prev, trend);
         return (
-          <td key={y.id} className="mono" style={{ color: trendColor(v, prev, trend) }}>
+          <td key={y.id} className="mono" style={{ color }}>
             {v != null ? fmtNum(v, decimals) : "—"}
           </td>
         );
@@ -574,15 +583,16 @@ function RawRow({ label, years, field, onDelete, decimals = 0, trend }) {
   );
 }
 
-function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend }) {
+function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend, thresholds }) {
   return (
     <tr>
       <td style={{ color: highlight ? "var(--gold)" : "var(--muted)", fontWeight: bold ? 700 : 400 }}>{label}</td>
       {years.map((y, i) => {
         const v = computeYearRatios(y)[calcKey];
         const prev = i > 0 ? computeYearRatios(years[i - 1])[calcKey] : null;
+        const color = thresholds ? thresholdColor(v, thresholds) : trendColor(v, prev, trend);
         return (
-          <td key={y.id} className="mono" style={{ fontWeight: bold ? 700 : 400, color: trendColor(v, prev, trend) }}>
+          <td key={y.id} className="mono" style={{ fontWeight: bold ? 700 : 400, color }}>
             {isPct ? fmtPct(v, decimals) : fmtNum(v, decimals)}
           </td>
         );
