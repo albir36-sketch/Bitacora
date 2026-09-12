@@ -400,7 +400,7 @@ export default function Analysis({ session }) {
                   Mostrar solo los últimos 8 años
                 </button>
               )}
-              <div className="table-wrap">
+              <div style={{ overflowX: "visible" }}>
                 <table>
                   <thead>
                     <tr ref={yearsRowRef}>
