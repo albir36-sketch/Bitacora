@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, X, Trash2, ArrowLeft, RefreshCw } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -150,13 +150,26 @@ export default function Analysis({ session }) {
   const [allPrices, setAllPrices] = useState({}); // companyId -> precio en vivo
   const [screeningLoading, setScreeningLoading] = useState(false);
   const [livePrice, setLivePrice] = useState(null);
+  const [showAllYears, setShowAllYears] = useState(false);
+  const cardsRef = useRef(null);
+  const [cardsHeight, setCardsHeight] = useState(0);
   const [priceLoading, setPriceLoading] = useState(false);
   const [showAddCompany, setShowAddCompany] = useState(false);
   const [showAddYear, setShowAddYear] = useState(false);
   const [editingCompany, setEditingCompany] = useState(false);
 
   useEffect(() => { loadCompanies(); }, []);
-  useEffect(() => { if (selectedId) { loadYears(selectedId); setLivePrice(null); } }, [selectedId]);
+  useEffect(() => { if (selectedId) { loadYears(selectedId); setLivePrice(null); setShowAllYears(false); } }, [selectedId]);
+
+  useEffect(() => {
+    if (!cardsRef.current) return;
+    const el = cardsRef.current;
+    const update = () => setCardsHeight(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [selectedId]);
 
   async function loadCompanies() {
     setLoading(true);
@@ -338,7 +351,11 @@ export default function Analysis({ session }) {
           </div>
 
           {/* objetivos */}
-          <div className="cards" style={{ marginBottom: 18 }}>
+          <div
+            className="cards"
+            ref={cardsRef}
+            style={{ marginBottom: 0, position: "sticky", top: 0, zIndex: 20, background: "var(--panel)", paddingTop: 8, paddingBottom: 12 }}
+          >
             <TargetCard label="Precio ahora" value={livePrice} currency={selected.currency} editable={false} />
             <TargetCard label="Objetivo 1" value={selected.target1} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target1: v })} />
             <TargetCard label="Objetivo 2" value={selected.target2} currency={selected.currency} onSave={(v) => updateCompany(selected.id, { target2: v })} />
@@ -356,42 +373,64 @@ export default function Analysis({ session }) {
             </div>
           </div>
 
-          {years.length === 0 ? <div className="empty">Añade al menos un año para empezar a calcular los ratios</div> : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Métrica</th>
-                    {years.map((y) => <th key={y.id} className="mono">{y.year}</th>)}
-                    <th className="mono" style={{ color: "var(--gold)" }}>AHORA</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <RawRow label="Nº acciones" years={years} field="shares" onDelete={deleteYear} />
-                  <RawRow label="Activo corriente" years={years} field="current_assets" onDelete={deleteYear} />
-                  <RawRow label="Activo no corriente" years={years} field="non_current_assets" onDelete={deleteYear} />
-                  <RawRow label="Pasivo corriente" years={years} field="current_liabilities" onDelete={deleteYear} />
-                  <RawRow label="Pasivo no corriente" years={years} field="non_current_liabilities" onDelete={deleteYear} />
-                  <RawRow label="Intangibles" years={years} field="intangibles" onDelete={deleteYear} />
-                  <RawRow label="Beneficio" years={years} field="profit" onDelete={deleteYear} />
-                  <RawRow label="Dividendo/acción" years={years} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
-                  <RawRow label="EBIT" years={years} field="ebit" onDelete={deleteYear} />
-                  <RawRow label="Cotización cierre de año" years={years} field="year_end_price" decimals={2} onDelete={deleteYear} nowValue={livePrice} />
-                  <ComputedRow label="Capitalización" years={years} calcKey="cap" nowData={nowData} decimals={0} />
-                  <ComputedRow label="AC−(PC+PNC)" years={years} calcKey="acMenosPasivos" nowData={nowData} />
-                  <ComputedRow label="Fondo de maniobra" years={years} calcKey="fondoManiobra" nowData={nowData} decimals={2} />
-                  <ComputedRow label="% Deuda sobre activos" years={years} calcKey="pctDeuda" nowData={nowData} isPct />
-                  <ComputedRow label="Valor contable (sin intang.)" years={years} calcKey="valorContableSin" nowData={nowData} decimals={2} />
-                  <ComputedRow label="Valor contable CON intang." years={years} calcKey="valorContableCon" nowData={nowData} decimals={2} />
-                  <ComputedRow label="PER" years={years} calcKey="per" nowData={nowData} decimals={2} />
-                  <ComputedRow label="Cotización PER 10" years={years} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
-                  <ComputedRow label="ROC (Fórmula Mágica)" years={years} calcKey="roc" nowData={nowData} isPct highlight />
-                  <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={years} calcKey="earningsYield" nowData={nowData} isPct highlight />
-                  <ComputedRow label="Media (Fórmula Mágica)" years={years} calcKey="medias" nowData={nowData} isPct highlight bold />
-                </tbody>
-              </table>
+          {years.length === 0 ? <div className="empty" style={{ marginTop: 18 }}>Añade al menos un año para empezar a calcular los ratios</div> : (() => {
+            const visibleYears = showAllYears ? years : years.slice(-8);
+            const hiddenCount = years.length - visibleYears.length;
+            return (
+            <div style={{ marginTop: 18 }}>
+              {hiddenCount > 0 && (
+                <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12, marginBottom: 8 }} onClick={() => setShowAllYears(true)}>
+                  Ver los {hiddenCount} años anteriores también
+                </button>
+              )}
+              {showAllYears && years.length > 8 && (
+                <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12, marginBottom: 8 }} onClick={() => setShowAllYears(false)}>
+                  Mostrar solo los últimos 8 años
+                </button>
+              )}
+              <div className="table-wrap">
+                <table>
+                  <thead style={{ position: "sticky", top: cardsHeight, zIndex: 10, background: "var(--panel)" }}>
+                    <tr>
+                      <th>Métrica</th>
+                      {visibleYears.map((y) => <th key={y.id} className="mono">{y.year}</th>)}
+                      <th className="mono" style={{ color: "var(--gold)" }}>AHORA</th>
+                    </tr>
+                    <tr>
+                      <th style={{ fontWeight: 400, color: "var(--muted)" }}>Cotización cierre de año</th>
+                      {visibleYears.map((y) => (
+                        <th key={y.id} className="mono" style={{ fontWeight: 400 }}>{y.year_end_price != null ? fmtNum(y.year_end_price, 2) : "—"}</th>
+                      ))}
+                      <th className="mono" style={{ color: "var(--gold)", fontWeight: 400 }}>{livePrice != null ? fmtNum(livePrice, 2) : "—"}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} />
+                    <ComputedRow label="AC−(PC+PNC)" years={visibleYears} calcKey="acMenosPasivos" nowData={nowData} />
+                    <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
+                    <RawRow label="Intangibles" years={visibleYears} field="intangibles" onDelete={deleteYear} />
+                    <RawRow label="Activo no corriente" years={visibleYears} field="non_current_assets" onDelete={deleteYear} />
+                    <ComputedRow label="Fondo de maniobra" years={visibleYears} calcKey="fondoManiobra" nowData={nowData} decimals={2} />
+                    <RawRow label="Activo corriente" years={visibleYears} field="current_assets" onDelete={deleteYear} />
+                    <RawRow label="Pasivo no corriente" years={visibleYears} field="non_current_liabilities" onDelete={deleteYear} />
+                    <ComputedRow label="% Deuda sobre activos" years={visibleYears} calcKey="pctDeuda" nowData={nowData} isPct />
+                    <RawRow label="Pasivo corriente" years={visibleYears} field="current_liabilities" onDelete={deleteYear} />
+                    <RawRow label="Beneficio" years={visibleYears} field="profit" onDelete={deleteYear} />
+                    <RawRow label="Dividendo/acción" years={visibleYears} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
+                    <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} />
+                    <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} />
+                    <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
+                    <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} />
+                    <RawRow label="EBIT" years={visibleYears} field="ebit" onDelete={deleteYear} />
+                    <ComputedRow label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight />
+                    <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight />
+                    <ComputedRow label="Media (Fórmula Mágica)" years={visibleYears} calcKey="medias" nowData={nowData} isPct highlight bold />
+                  </tbody>
+                </table>
+              </div>
             </div>
-          )}
+            );
+          })()}
 
           <div style={{ marginTop: 16, display: "flex", gap: 20, flexWrap: "wrap" }}>
             <TTMField label="Beneficio actual (TTM, opcional)" value={selected.ttm_profit} onSave={(v) => updateCompany(selected.id, { ttm_profit: v })} />
