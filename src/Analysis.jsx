@@ -352,13 +352,22 @@ export default function Analysis({ session }) {
             <ShoppingList companies={companies} allPrices={allPrices} onSelect={setSelectedId} />
           ) : !investorFilter ? (
             <div className="cards">
-              {companies.map((c) => (
-                <div key={c.id} className="card" style={{ cursor: "pointer" }} onClick={() => setSelectedId(c.id)}>
-                  <div className="card-label">{c.ticker}</div>
-                  <div className="card-value" style={{ fontSize: 16 }}>{c.company_name || "—"}</div>
-                  <div className="card-sub">{c.currency}</div>
-                </div>
-              ))}
+              {companies.map((c) => {
+                const missingTarget = c.target1 == null && c.target2 == null && c.sell1 == null;
+                return (
+                  <div key={c.id} className="card" style={{ cursor: "pointer", position: "relative" }} onClick={() => setSelectedId(c.id)}>
+                    {missingTarget && (
+                      <span
+                        title="Sin ningún precio objetivo puesto todavía"
+                        style={{ position: "absolute", top: 10, right: 10, width: 9, height: 9, borderRadius: "50%", background: "var(--loss)" }}
+                      />
+                    )}
+                    <div className="card-label">{c.ticker}</div>
+                    <div className="card-value" style={{ fontSize: 16 }}>{c.company_name || "—"}</div>
+                    <div className="card-sub">{c.currency}</div>
+                  </div>
+                );
+              })}
             </div>
           ) : investorFilter === "dalio" ? (
             <DalioPanel companies={companies} onSelect={setSelectedId} />
