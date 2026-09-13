@@ -19,15 +19,15 @@ const fmtNum = (n, digits = 2) => {
 const fmtPct = (n, digits = 2) => (n == null || Number.isNaN(n)) ? "—" : `${n.toFixed(digits)}%`;
 
 // ---------- fórmulas (verificadas contra la hoja de referencia del usuario) ----------
-// Tasa de crecimiento anual compuesta (CAGR) del beneficio, usando el primer y el último año
-// con datos disponibles. Solo tiene sentido si ambos son positivos (si hay pérdidas de por medio,
-// un CAGR no significa nada real).
+// Tasa de crecimiento anual compuesta (CAGR) del beneficio, usando el PRIMER y el ÚLTIMO año CON
+// beneficio positivo dentro del histórico (saltándose años de pérdidas intermedios, si los hay —
+// un CAGR entre un número negativo y uno positivo no significa nada matemáticamente coherente).
 function computeGrowthRate(years) {
-  const valid = years.filter((y) => y.profit != null);
-  if (valid.length < 2) return null;
-  const first = valid[0], last = valid[valid.length - 1];
+  const positive = years.filter((y) => y.profit != null && y.profit > 0);
+  if (positive.length < 2) return null;
+  const first = positive[0], last = positive[positive.length - 1];
   const n = last.year - first.year;
-  if (n <= 0 || first.profit <= 0 || last.profit <= 0) return null;
+  if (n <= 0) return null;
   return (Math.pow(last.profit / first.profit, 1 / n) - 1) * 100; // en %, ej. 12 = 12%
 }
 
