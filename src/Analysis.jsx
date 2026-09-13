@@ -592,10 +592,20 @@ function ShoppingList({ companies, allPrices, onSelect }) {
                 <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>{r.company.company_name}</span>
               </td>
               <td className="mono">{r.price != null ? fmtNum(r.price, 2) : "—"}</td>
-              <td className="mono">{r.company.target1 != null ? fmtNum(r.company.target1, 2) : "—"}</td>
+              <td className="mono" title={r.company.target1_note || undefined}>
+                {r.company.target1 != null ? fmtNum(r.company.target1, 2) : "—"}
+                {r.company.target1_note && (
+                  <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400, whiteSpace: "normal", maxWidth: 160 }}>{r.company.target1_note}</div>
+                )}
+              </td>
               <td className="mono" style={{ color: diffColor(r.above1) }}>{r.diff1 != null ? `${r.diff1 >= 0 ? "+" : ""}${r.diff1.toFixed(1)}%` : "—"}</td>
               <td>{r.company.target1 != null && <Flag buy={r.buy1} almost={r.almost1} label="mod." />}</td>
-              <td className="mono">{r.company.target2 != null ? fmtNum(r.company.target2, 2) : "—"}</td>
+              <td className="mono" title={r.company.target2_note || undefined}>
+                {r.company.target2 != null ? fmtNum(r.company.target2, 2) : "—"}
+                {r.company.target2_note && (
+                  <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400, whiteSpace: "normal", maxWidth: 160 }}>{r.company.target2_note}</div>
+                )}
+              </td>
               <td className="mono" style={{ color: diffColor(r.above2) }}>{r.diff2 != null ? `${r.diff2 >= 0 ? "+" : ""}${r.diff2.toFixed(1)}%` : "—"}</td>
               <td>{r.company.target2 != null && <Flag buy={r.buy2} almost={r.almost2} label="fuerte" />}</td>
             </tr>
