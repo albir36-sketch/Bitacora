@@ -19,7 +19,19 @@ const fmtNum = (n, digits = 2) => {
 const fmtPct = (n, digits = 2) => (n == null || Number.isNaN(n)) ? "—" : `${n.toFixed(digits)}%`;
 
 // ---------- fórmulas (verificadas contra la hoja de referencia del usuario) ----------
-function computeYearRatios(y) {
+// Tasa de crecimiento anual compuesta (CAGR) del beneficio, usando el primer y el último año
+// con datos disponibles. Solo tiene sentido si ambos son positivos (si hay pérdidas de por medio,
+// un CAGR no significa nada real).
+function computeGrowthRate(years) {
+  const valid = years.filter((y) => y.profit != null);
+  if (valid.length < 2) return null;
+  const first = valid[0], last = valid[valid.length - 1];
+  const n = last.year - first.year;
+  if (n <= 0 || first.profit <= 0 || last.profit <= 0) return null;
+  return (Math.pow(last.profit / first.profit, 1 / n) - 1) * 100; // en %, ej. 12 = 12%
+}
+
+function computeYearRatios(y, growthRate) {
   const ac = y.current_assets || 0, anc = y.non_current_assets || 0;
   const pc = y.current_liabilities || 0, pnc = y.non_current_liabilities || 0;
   const intang = y.intangibles || 0, shares = y.shares || 0;
@@ -42,6 +54,17 @@ function computeYearRatios(y) {
   const grahamNumber = (bpa != null && bpa > 0 && valorContableSin != null && valorContableSin > 0)
     ? Math.sqrt(22.5 * bpa * valorContableSin)
     : null;
+  // Fórmula de Graham modificada (para crecimiento): BPA × (8,5 + 2g), donde g es el % de
+  // crecimiento anual esperado (aquí, el histórico calculado). 8,5 es el PER que Graham
+  // consideraba justo para una empresa que no crece nada.
+  const grahamGrowth = (bpa != null && bpa > 0 && growthRate != null && growthRate > 0)
+    ? bpa * (8.5 + 2 * growthRate)
+    : null;
+  // Ratio PEG (Peter Lynch): PER / % de crecimiento anual del beneficio. PEG=1 se considera
+  // "precio justo" para lo que crece; por debajo de 1, potencialmente barata; por encima, cara.
+  const pegRatio = (per != null && per > 0 && growthRate != null && growthRate > 0)
+    ? per / growthRate
+    : null;
   const nwc = ac - pc;
   const netFixedAssets = anc - intang;
   const roc = (ebit != null && (nwc + netFixedAssets) !== 0) ? (ebit / (nwc + netFixedAssets)) * 100 : null;
@@ -49,7 +72,7 @@ function computeYearRatios(y) {
   const earningsYield = (ebit != null && ev) ? (ebit / ev) * 100 : null;
   const medias = (roc != null && earningsYield != null) ? (roc + earningsYield) / 2 : null;
 
-  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, grahamNumber, roc, earningsYield, medias };
+  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, grahamNumber, grahamGrowth, pegRatio, roc, earningsYield, medias, bpa };
 }
 
 // ---------- criterios de cribado por "estilo de inversor" ----------
@@ -274,6 +297,7 @@ export default function Analysis({ session }) {
 
   // ---------- columna "AHORA" ----------
   const latestYear = years.length > 0 ? years[years.length - 1] : null;
+  const growthRate = useMemo(() => computeGrowthRate(years), [years]);
   const nowData = useMemo(() => {
     if (!latestYear) return null;
     const shares = latestYear.shares || 0;
@@ -281,8 +305,8 @@ export default function Analysis({ session }) {
     const cap = price != null ? shares * price : null;
     const profit = selected?.ttm_profit ?? latestYear.profit;
     const ebit = selected?.ttm_ebit ?? latestYear.ebit;
-    return computeYearRatios({ ...latestYear, profit, ebit, year_end_price: null, market_cap: cap });
-  }, [latestYear, livePrice, selected]);
+    return computeYearRatios({ ...latestYear, profit, ebit, year_end_price: null, market_cap: cap }, growthRate);
+  }, [latestYear, livePrice, selected, growthRate]);
 
   if (loading) return <div className="empty">Cargando análisis…</div>;
 
@@ -389,6 +413,30 @@ export default function Analysis({ session }) {
             </div>
           </div>
 
+          {!selected.target1 && nowData && (nowData.grahamNumber != null || nowData.grahamGrowth != null) && (
+            <div style={{ marginTop: 10, marginBottom: 8 }}>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "6px 12px", fontSize: 12 }}
+                onClick={() => {
+                  const useGrowth = growthRate != null && growthRate >= 8 && nowData.grahamGrowth != null;
+                  const value = useGrowth ? nowData.grahamGrowth : nowData.grahamNumber;
+                  const formula = useGrowth ? "Fórmula de Graham modificada (crecimiento)" : "Número de Graham";
+                  if (value == null) return;
+                  updateCompany(selected.id, {
+                    target1: Math.round(value * 100) / 100,
+                    target1_note: `Sugerido automáticamente (${formula}${growthRate != null ? `, g=${growthRate.toFixed(1)}%` : ""}). Puedes cambiarlo cuando quieras.`,
+                  });
+                }}
+              >
+                Sugerir Objetivo 1 ({growthRate != null && growthRate >= 8 ? "Graham modificada, empresa en crecimiento" : "Número de Graham, empresa estable"})
+              </button>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                Se usa la Fórmula de Graham modificada si el crecimiento histórico del beneficio es ≥8%, o el Número de Graham si es menor — así siempre tienes al menos un precio objetivo de partida. Tú puedes poner otro distinto (Objetivo 2, Venta 1) o cambiarlo cuando quieras.
+              </div>
+            </div>
+          )}
+
           {years.length === 0 ? <div className="empty" style={{ marginTop: 18 }}>Añade al menos un año para empezar a calcular los ratios</div> : (() => {
             const visibleYears = showAllYears ? years : years.slice(-8);
             const hiddenCount = years.length - visibleYears.length;
@@ -421,29 +469,37 @@ export default function Analysis({ session }) {
                     </tr>
                   </thead>
                   <tbody>
-                    <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} trend="up" />
-                    <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} />
-                    <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} />
+                    <ComputedRow label="Valor contable (sin intang.)" years={visibleYears} calcKey="valorContableSin" nowData={nowData} decimals={2} trend="up" growthRate={growthRate} />
+                    <ComputedRow label="PER" years={visibleYears} calcKey="per" nowData={nowData} decimals={2} growthRate={growthRate} />
+                    <ComputedRow label="Cotización PER 10" years={visibleYears} calcKey="cotizacionPER10" nowData={nowData} decimals={2} growthRate={growthRate} />
                     <ComputedRow
-                      label="Número de Graham" years={visibleYears} calcKey="grahamNumber" nowData={nowData} decimals={2}
-                      tooltip="Precio máximo razonable según Benjamin Graham: √(22,5 × Beneficio por acción × Valor contable por acción). Pagar por encima de este precio implica un PER y un Precio/Valor contable combinados más altos de lo que él consideraba prudente para un inversor defensivo."
+                      label="Número de Graham" years={visibleYears} calcKey="grahamNumber" nowData={nowData} decimals={2} growthRate={growthRate}
+                      tooltip="Precio máximo razonable según Benjamin Graham para el INVERSOR DEFENSIVO: √(22,5 × Beneficio por acción × Valor contable por acción). Mejor para empresas maduras, estables y con muchos activos tangibles (industriales, energéticas, bancos...). No tiene en cuenta el crecimiento futuro, así que penaliza a negocios de activos ligeros aunque sean buenos."
                     />
-                    <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} trend="up" />
+                    <ComputedRow
+                      label="Graham modificada (crecimiento)" years={visibleYears} calcKey="grahamGrowth" nowData={nowData} decimals={2} growthRate={growthRate}
+                      tooltip={`Precio razonable de Graham para empresas EN CRECIMIENTO: Beneficio por acción × (8,5 + 2×g), donde g es el % de crecimiento anual del beneficio (aquí, el histórico calculado sobre los años que tienes guardados${growthRate != null ? `: ${growthRate.toFixed(1)}%` : ""}). Mejor para negocios que crecen con fuerza y tienen poco activo tangible (tecnología, salud, farma). La "g" es una estimación basada en el pasado, no una garantía de futuro.`}
+                    />
+                    <ComputedRow
+                      label="Ratio PEG (Peter Lynch)" years={visibleYears} calcKey="pegRatio" nowData={nowData} decimals={2} growthRate={growthRate}
+                      tooltip="PER dividido entre el % de crecimiento anual del beneficio. PEG = 1 se considera 'precio justo' para lo que crece; por debajo de 1, potencialmente barata para su crecimiento; por encima de 1, cara. Es un ratio (no un precio), y como la 'g' es una estimación, hay que tomarlo como una guía, no como una verdad absoluta. Útil para comparar empresas de crecimiento entre sí."
+                    />
+                    <ComputedRow label="Valor contable CON intang." years={visibleYears} calcKey="valorContableCon" nowData={nowData} decimals={2} trend="up" growthRate={growthRate} />
                     <RawRow label="Nº acciones" years={visibleYears} field="shares" onDelete={deleteYear} trend="down" />
-                    <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} />
+                    <ComputedRow label="Capitalización" years={visibleYears} calcKey="cap" nowData={nowData} decimals={0} growthRate={growthRate} />
                     <RawRow label="Intangibles" years={visibleYears} field="intangibles" onDelete={deleteYear} trend="down" />
                     <RawRow label="Activo no corriente" years={visibleYears} field="non_current_assets" onDelete={deleteYear} muted />
-                    <ComputedRow label="Fondo de maniobra" years={visibleYears} calcKey="fondoManiobra" nowData={nowData} decimals={2} thresholds={{ good: 1.5, bad: 1 }} />
+                    <ComputedRow label="Fondo de maniobra" years={visibleYears} calcKey="fondoManiobra" nowData={nowData} decimals={2} thresholds={{ good: 1.5, bad: 1 }} growthRate={growthRate} />
                     <RawRow label="Activo corriente" years={visibleYears} field="current_assets" onDelete={deleteYear} />
                     <RawRow label="Pasivo no corriente" years={visibleYears} field="non_current_liabilities" onDelete={deleteYear} muted />
-                    <ComputedRow label="% Deuda sobre activos" years={visibleYears} calcKey="pctDeuda" nowData={nowData} isPct />
+                    <ComputedRow label="% Deuda sobre activos" years={visibleYears} calcKey="pctDeuda" nowData={nowData} isPct growthRate={growthRate} />
                     <RawRow label="Pasivo corriente" years={visibleYears} field="current_liabilities" onDelete={deleteYear} />
                     <RawRow label="Beneficio" years={visibleYears} field="profit" onDelete={deleteYear} trend="up" />
                     <RawRow label="Dividendo/acción" years={visibleYears} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
                     <RawRow label="EBIT" years={visibleYears} field="ebit" onDelete={deleteYear} trend="up" />
-                    <ComputedRow label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight />
-                    <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight />
-                    <ComputedRow label="Media (Fórmula Mágica)" years={visibleYears} calcKey="medias" nowData={nowData} isPct highlight bold />
+                    <ComputedRow label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight growthRate={growthRate} />
+                    <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight growthRate={growthRate} />
+                    <ComputedRow label="Media (Fórmula Mágica)" years={visibleYears} calcKey="medias" nowData={nowData} isPct highlight bold growthRate={growthRate} />
                   </tbody>
                 </table>
               </div>
@@ -680,7 +736,7 @@ function RawRow({ label, years, field, onDelete, decimals = 0, trend, muted }) {
   );
 }
 
-function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend, thresholds, tooltip }) {
+function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, highlight, bold, trend, thresholds, tooltip, growthRate }) {
   return (
     <tr>
       <td
@@ -690,8 +746,8 @@ function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, high
         {label}
       </td>
       {years.map((y, i) => {
-        const v = computeYearRatios(y)[calcKey];
-        const prev = i > 0 ? computeYearRatios(years[i - 1])[calcKey] : null;
+        const v = computeYearRatios(y, growthRate)[calcKey];
+        const prev = i > 0 ? computeYearRatios(years[i - 1], growthRate)[calcKey] : null;
         const color = thresholds ? thresholdColor(v, thresholds) : trendColor(v, prev, trend);
         return (
           <td key={y.id} className="mono" style={{ fontWeight: bold ? 700 : 400, color }}>
