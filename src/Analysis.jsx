@@ -22,6 +22,90 @@ const fmtPct = (n, digits = 2) => (n == null || Number.isNaN(n)) ? "—" : `${n.
 // Tasa de crecimiento anual compuesta (CAGR) del beneficio, usando el PRIMER y el ÚLTIMO año CON
 // beneficio positivo dentro del histórico (saltándose años de pérdidas intermedios, si los hay —
 // un CAGR entre un número negativo y uno positivo no significa nada matemáticamente coherente).
+// ---------- detector de "trampas de valor" (5 filtros) ----------
+// Cada filtro devuelve {available, triggered, detail} — available=false si faltan datos para
+// calcularlo, en vez de dar un falso "todo bien".
+function detectValueTraps(years, wacc) {
+  const checks = [];
+  if (years.length === 0) return checks;
+  const last = years[years.length - 1];
+
+  // 1) Payout Ratio: dividendo / BPA. >80% aviso, >100% aviso fuerte.
+  const bpaLast = last.shares ? (last.profit ?? 0) / last.shares : null;
+  if (last.dividend_per_share != null && bpaLast != null && bpaLast > 0) {
+    const payout = (last.dividend_per_share / bpaLast) * 100;
+    checks.push({
+      id: "payout", label: "Payout Ratio", available: true,
+      triggered: payout > 80, severe: payout > 100,
+      detail: `${payout.toFixed(0)}% del beneficio se destina a dividendo`,
+    });
+  } else {
+    checks.push({ id: "payout", label: "Payout Ratio", available: false, detail: "Falta dividendo o beneficio positivo" });
+  }
+
+  // 2) Tendencia de márgenes (bruto y operativo) en los últimos 5 años.
+  const last5 = years.slice(-5).filter((y) => y.revenue != null && y.revenue > 0);
+  if (last5.length >= 3) {
+    const grossMargins = last5.map((y) => (y.gross_profit != null ? (y.gross_profit / y.revenue) * 100 : null)).filter((v) => v != null);
+    const opMargins = last5.map((y) => (y.ebit != null ? (y.ebit / y.revenue) * 100 : null)).filter((v) => v != null);
+    const isDecreasing = (arr) => arr.length >= 3 && arr[arr.length - 1] < arr[0] && arr.every((v, i) => i === 0 || v <= arr[i - 1] + 0.5); // tolera pequeños repuntes
+    const grossDown = isDecreasing(grossMargins);
+    const opDown = isDecreasing(opMargins);
+    checks.push({
+      id: "margins", label: "Tendencia de márgenes", available: grossMargins.length >= 3 || opMargins.length >= 3,
+      triggered: grossDown || opDown, severe: grossDown && opDown,
+      detail: `Margen bruto: ${grossMargins.map((v) => v.toFixed(0) + "%").join(" → ")} · Margen operativo: ${opMargins.map((v) => v.toFixed(0) + "%").join(" → ")}`,
+    });
+  } else {
+    checks.push({ id: "margins", label: "Tendencia de márgenes", available: false, detail: "Faltan Ingresos totales de al menos 3 años" });
+  }
+
+  // 3) Flujo de Caja Libre vs Beneficio Neto.
+  const withFcf = years.filter((y) => y.operating_cash_flow != null && y.capex != null && y.profit != null).slice(-3);
+  if (withFcf.length >= 2) {
+    const first = withFcf[0], lastY = withFcf[withFcf.length - 1];
+    const fcfFirst = first.operating_cash_flow - first.capex;
+    const fcfLast = lastY.operating_cash_flow - lastY.capex;
+    const profitFlatOrUp = lastY.profit >= first.profit * 0.95;
+    const fcfDown = fcfLast < fcfFirst || fcfLast < 0;
+    checks.push({
+      id: "fcf", label: "FCF vs Beneficio Neto", available: true,
+      triggered: profitFlatOrUp && fcfDown, severe: fcfLast < 0,
+      detail: `FCF: ${fmtNum(fcfFirst, 0)} → ${fmtNum(fcfLast, 0)} · Beneficio: ${fmtNum(first.profit, 0)} → ${fmtNum(lastY.profit, 0)}`,
+    });
+  } else {
+    checks.push({ id: "fcf", label: "FCF vs Beneficio Neto", available: false, detail: "Faltan Flujo de caja operativo y CapEx de al menos 2 años" });
+  }
+
+  // 4) Deuda Neta / EBITDA.
+  if (last.total_debt != null && last.ebitda != null && last.ebitda > 0) {
+    const netDebt = last.total_debt - (last.cash || 0);
+    const ratio = netDebt / last.ebitda;
+    checks.push({
+      id: "debt", label: "Deuda Neta / EBITDA", available: true,
+      triggered: ratio > 3, severe: ratio > 4,
+      detail: `${ratio.toFixed(1)}x`,
+    });
+  } else {
+    checks.push({ id: "debt", label: "Deuda Neta / EBITDA", available: false, detail: "Faltan Deuda total y EBITDA" });
+  }
+
+  // 5) ROIC < WACC (aproximado con el ROC de la Fórmula Mágica, comparado con un WACC asumido).
+  const r = computeYearRatios(last, null);
+  const waccUsed = wacc != null ? wacc : 9; // 9% por defecto, asunción razonable si no se especifica
+  if (r.roc != null) {
+    checks.push({
+      id: "roic", label: "ROIC < WACC", available: true,
+      triggered: r.roc < waccUsed, severe: r.roc < 0,
+      detail: `ROC≈${r.roc.toFixed(1)}% vs WACC asumido ${waccUsed}%`,
+    });
+  } else {
+    checks.push({ id: "roic", label: "ROIC < WACC", available: false, detail: "Falta EBIT o balance del último año" });
+  }
+
+  return checks;
+}
+
 function computeGrowthRate(years) {
   const positive = years.filter((y) => y.profit != null && y.profit > 0);
   if (positive.length < 2) return null;
@@ -298,6 +382,7 @@ export default function Analysis({ session }) {
   // ---------- columna "AHORA" ----------
   const latestYear = years.length > 0 ? years[years.length - 1] : null;
   const growthRate = useMemo(() => computeGrowthRate(years), [years]);
+  const valueTraps = useMemo(() => detectValueTraps(years, selected?.wacc_override), [years, selected]);
   const nowData = useMemo(() => {
     if (!latestYear) return null;
     const shares = latestYear.shares || 0;
@@ -420,6 +505,16 @@ export default function Analysis({ session }) {
                 {SECTORS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+            <div className="card">
+              <div className="card-label">WACC asumido (para ROIC&lt;WACC)</div>
+              <input
+                type="number" className="price-input" style={{ marginTop: 4, width: "100%" }}
+                defaultValue={selected.wacc_override ?? ""} placeholder="9 (por defecto)"
+                key={selected.id}
+                onBlur={(e) => updateCompany(selected.id, { wacc_override: e.target.value === "" ? null : Number(e.target.value) })}
+              />
+              <div className="card-sub">% · deja en blanco para usar 9%</div>
+            </div>
           </div>
 
           {!selected.target1 && nowData && (nowData.grahamNumber != null || nowData.grahamGrowth != null) && (
@@ -445,6 +540,28 @@ export default function Analysis({ session }) {
               </div>
             </div>
           )}
+
+          {valueTraps.length > 0 && (() => {
+            const triggeredSevere = valueTraps.filter((c) => c.available && c.severe);
+            const triggeredMild = valueTraps.filter((c) => c.available && c.triggered && !c.severe);
+            const anyTriggered = triggeredSevere.length > 0 || triggeredMild.length > 0;
+            return (
+              <div className="panel" style={{ marginTop: 14, marginBottom: 8, background: anyTriggered ? (triggeredSevere.length > 0 ? "#2A1414" : "#2A2410") : "var(--panel2)" }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: triggeredSevere.length > 0 ? "var(--loss)" : anyTriggered ? "var(--gold)" : "var(--gain)" }}>
+                  {triggeredSevere.length > 0 ? "⚠️ Posible trampa de valor" : anyTriggered ? "Alguna señal de alerta" : "Sin señales de trampa de valor"}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {valueTraps.map((c) => (
+                    <div key={c.id} style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "baseline" }}>
+                      <span style={{ minWidth: 18 }}>{!c.available ? "—" : c.severe ? "🔴" : c.triggered ? "🟡" : "🟢"}</span>
+                      <span style={{ fontWeight: 600, minWidth: 150 }}>{c.label}</span>
+                      <span style={{ color: "var(--muted)" }}>{c.detail}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {years.length === 0 ? <div className="empty" style={{ marginTop: 18 }}>Añade al menos un año para empezar a calcular los ratios</div> : (() => {
             const visibleYears = showAllYears ? years : years.slice(-8);
@@ -907,6 +1024,7 @@ function AddYearModal({ onCancel, onSave, existingYears }) {
   const [fields, setFields] = useState({
     shares: "", current_assets: "", non_current_assets: "", current_liabilities: "", non_current_liabilities: "",
     intangibles: "", profit: "", dividend_per_share: "", ebit: "", year_end_price: "",
+    revenue: "", gross_profit: "", ebitda: "", total_debt: "", cash: "", operating_cash_flow: "", capex: "",
   });
 
   function upd(k, v) { setFields((prev) => ({ ...prev, [k]: v })); }
@@ -923,6 +1041,11 @@ function AddYearModal({ onCancel, onSave, existingYears }) {
     current_liabilities: "Pasivo corriente", non_current_liabilities: "Pasivo no corriente", intangibles: "Intangibles",
     profit: "Beneficio", dividend_per_share: "Dividendo/acción", ebit: "EBIT", year_end_price: "Cotización cierre de año",
   };
+  const labelsTrampa = {
+    revenue: "Ingresos totales", gross_profit: "Beneficio bruto", ebitda: "EBITDA",
+    total_debt: "Deuda total (Total Debt)", cash: "Efectivo y equivalentes",
+    operating_cash_flow: "Flujo de caja operativo", capex: "CapEx (inversión en activo fijo)",
+  };
 
   return (
     <div className="modal-overlay">
@@ -933,6 +1056,15 @@ function AddYearModal({ onCancel, onSave, existingYears }) {
           {Object.keys(labels).map((k) => (
             <div className="field" key={k}>
               <div className="field-label">{labels[k]}</div>
+              <input type="number" value={fields[k]} onChange={(e) => upd(k, e.target.value)} />
+            </div>
+          ))}
+        </div>
+        <div className="field-label" style={{ marginTop: 18, marginBottom: 8, color: "var(--gold)" }}>Para detectar trampas de valor (opcional)</div>
+        <div className="form-grid">
+          {Object.keys(labelsTrampa).map((k) => (
+            <div className="field" key={k}>
+              <div className="field-label">{labelsTrampa[k]}</div>
               <input type="number" value={fields[k]} onChange={(e) => upd(k, e.target.value)} />
             </div>
           ))}
