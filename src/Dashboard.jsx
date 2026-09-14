@@ -270,7 +270,7 @@ export default function Dashboard({ session }) {
   const [showAddSnapshot, setShowAddSnapshot] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showAdd, setShowAdd] = useState(false);
+  const [showAdd, setShowAdd] = useState(false); // false | true | {ticker, action, currency}
   const [showAddCash, setShowAddCash] = useState(false);
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
@@ -1449,7 +1449,7 @@ export default function Dashboard({ session }) {
           {openPositions.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Prom.</th><th>$ Actual</th><th>$ Mercado</th><th>P&L no realiz.</th><th>%</th></tr></thead>
+                <thead><tr><th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Prom.</th><th>$ Actual</th><th>$ Mercado</th><th>P&L no realiz.</th><th>%</th><th></th></tr></thead>
                 <tbody>
                   {openPositions.map((p) => {
                     const cur = prices[p.ticker] ?? p.avgCost;
@@ -1472,6 +1472,22 @@ export default function Dashboard({ session }) {
                         <td className="mono">{fmtCur(mv, p.currency)}</td>
                         <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{fmtCur(pnl, p.currency)}</td>
                         <td className="mono" style={{ color: pnl >= 0 ? "var(--gain)" : "var(--loss)" }}>{pct.toFixed(1)}%</td>
+                        <td>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button
+                              className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12 }}
+                              onClick={() => setShowAdd({ ticker: p.ticker, action: "buy", currency: p.currency, type: "stock" })}
+                            >
+                              Comprar más
+                            </button>
+                            <button
+                              className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12 }}
+                              onClick={() => setShowAdd({ ticker: p.ticker, action: "sell", currency: p.currency, type: "stock" })}
+                            >
+                              Vender
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}
@@ -1499,7 +1515,7 @@ export default function Dashboard({ session }) {
                     </div>
                     <div className="table-wrap">
                       <table>
-                        <thead><tr><th>Ticker</th><th>Divisa</th><th>Detalle</th><th>Vencimiento</th><th>Prima</th><th>P&L no realiz.</th></tr></thead>
+                        <thead><tr><th>Ticker</th><th>Divisa</th><th>Detalle</th><th>Vencimiento</th><th>Prima</th><th>P&L no realiz.</th><th></th></tr></thead>
                         <tbody>
                           {group.trades.map((t) => {
                             const u = unrealizedOptionPnL(t, markPrices);
@@ -1515,6 +1531,15 @@ export default function Dashboard({ session }) {
                                 </td>
                                 <td className="mono">{fmtCur((t.legs || []).reduce((s, l) => s + l.price, 0), t.currency)}</td>
                                 <td className="mono" style={{ color: u == null ? "var(--muted)" : u >= 0 ? "var(--gain)" : "var(--loss)" }}>{u == null ? "—" : fmtCur(u, t.currency)}</td>
+                                <td>
+                                  <button
+                                    className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12 }}
+                                    title="Cerrar / Asignar / Roll"
+                                    onClick={() => setClosingTrade(t)}
+                                  >
+                                    Cerrar / Roll
+                                  </button>
+                                </td>
                               </tr>
                             );
                           })}
@@ -1573,7 +1598,16 @@ export default function Dashboard({ session }) {
         </div>
       </div>
 
-      {showAdd && <AddTradeModal onCancel={() => setShowAdd(false)} onSave={addTrade} defaultCurrency={currency} />}
+      {showAdd && (
+        <AddTradeModal
+          onCancel={() => setShowAdd(false)}
+          onSave={addTrade}
+          defaultCurrency={(typeof showAdd === "object" && showAdd.currency) || currency}
+          defaultTicker={typeof showAdd === "object" ? showAdd.ticker : undefined}
+          defaultAction={typeof showAdd === "object" ? showAdd.action : undefined}
+          defaultType={typeof showAdd === "object" ? showAdd.type : undefined}
+        />
+      )}
       {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} defaultCurrency={currency} />}
       {showAddDividend && <AddDividendModal onCancel={() => setShowAddDividend(false)} onSave={addDividend} defaultCurrency={currency} />}
       {showAddSnapshot && <AddSnapshotModal onCancel={() => setShowAddSnapshot(false)} onSave={addSnapshot} defaultCurrency={currency} />}
@@ -1659,16 +1693,16 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
   );
 }
 
-function AddTradeModal({ onCancel, onSave, defaultCurrency }) {
-  const [type, setType] = useState("stock");
-  const [ticker, setTicker] = useState("");
+function AddTradeModal({ onCancel, onSave, defaultCurrency, defaultTicker, defaultAction, defaultType }) {
+  const [type, setType] = useState(defaultType || "stock");
+  const [ticker, setTicker] = useState(defaultTicker || "");
   const [date, setDate] = useState(localDateStr(new Date()));
   const [qty, setQty] = useState("");
   const [notes, setNotes] = useState("");
   const [commission, setCommission] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency || "USD");
   // stock
-  const [action, setAction] = useState("buy");
+  const [action, setAction] = useState(defaultAction || "buy");
   const [price, setPrice] = useState("");
   // option
   const [expiration, setExpiration] = useState("");
