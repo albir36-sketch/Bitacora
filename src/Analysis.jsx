@@ -38,6 +38,7 @@ function detectValueTraps(years, wacc) {
       id: "payout", label: "Payout Ratio", available: true,
       triggered: payout > 80, severe: payout > 100,
       detail: `${payout.toFixed(0)}% del beneficio se destina a dividendo`,
+      reminder: "Razonable: por debajo del 60-70% suele ser sostenible. Por encima del 80%, vigilar; por encima del 100%, la empresa reparte más de lo que gana — el recorte de dividendo puede estar cerca.",
     });
   } else {
     checks.push({ id: "payout", label: "Payout Ratio", available: false, detail: "Falta dividendo o beneficio positivo" });
@@ -55,6 +56,7 @@ function detectValueTraps(years, wacc) {
       id: "margins", label: "Tendencia de márgenes", available: grossMargins.length >= 3 || opMargins.length >= 3,
       triggered: grossDown || opDown, severe: grossDown && opDown,
       detail: `Margen bruto: ${grossMargins.map((v) => v.toFixed(0) + "%").join(" → ")} · Margen operativo: ${opMargins.map((v) => v.toFixed(0) + "%").join(" → ")}`,
+      reminder: "Razonable: márgenes estables o creciendo. Una caída puntual de un año no es grave; una caída sostenida y constante varios años seguidos sí indica que la empresa pierde poder de fijación de precios frente a la competencia.",
     });
   } else {
     checks.push({ id: "margins", label: "Tendencia de márgenes", available: false, detail: "Faltan Ingresos totales de al menos 3 años" });
@@ -72,6 +74,7 @@ function detectValueTraps(years, wacc) {
       id: "fcf", label: "FCF vs Beneficio Neto", available: true,
       triggered: profitFlatOrUp && fcfDown, severe: fcfLast < 0,
       detail: `FCF: ${fmtNum(fcfFirst, 0)} → ${fmtNum(fcfLast, 0)} · Beneficio: ${fmtNum(first.profit, 0)} → ${fmtNum(lastY.profit, 0)}`,
+      reminder: "Razonable: el FCF debería moverse más o menos en línea con el beneficio neto. Si el beneficio se mantiene o sube pero el FCF cae o se vuelve negativo, el beneficio contable puede no estar reflejando caja real.",
     });
   } else {
     checks.push({ id: "fcf", label: "FCF vs Beneficio Neto", available: false, detail: "Faltan Flujo de caja operativo y CapEx de al menos 2 años" });
@@ -85,6 +88,7 @@ function detectValueTraps(years, wacc) {
       id: "debt", label: "Deuda Neta / EBITDA", available: true,
       triggered: ratio > 3, severe: ratio > 4,
       detail: `${ratio.toFixed(1)}x`,
+      reminder: "Razonable: por debajo de 2x es cómodo; entre 2x y 3x, aceptable según el sector (las utilities o telecos suelen aguantar más deuda que una tecnológica). Por encima de 3-4x, la empresa está muy apalancada y una subida de tipos le puede hacer mucho daño.",
     });
   } else {
     checks.push({ id: "debt", label: "Deuda Neta / EBITDA", available: false, detail: "Faltan Deuda total y EBITDA" });
@@ -98,6 +102,7 @@ function detectValueTraps(years, wacc) {
       id: "roic", label: "ROIC < WACC", available: true,
       triggered: r.roc < waccUsed, severe: r.roc < 0,
       detail: `ROC≈${r.roc.toFixed(1)}% vs WACC asumido ${waccUsed}%`,
+      reminder: "Razonable: que el ROC/ROIC esté claramente por encima del coste de capital (aquí, un 9% asumido). Si está por debajo, la empresa destruye valor cada vez que reinvierte un euro; si es negativo, la señal es aún más grave.",
     });
   } else {
     checks.push({ id: "roic", label: "ROIC < WACC", available: false, detail: "Falta EBIT o balance del último año" });
@@ -507,16 +512,6 @@ export default function Analysis({ session }) {
                 {SECTORS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
-            <div className="card">
-              <div className="card-label">WACC asumido (para ROIC&lt;WACC)</div>
-              <input
-                type="number" className="price-input" style={{ marginTop: 4, width: "100%" }}
-                defaultValue={selected.wacc_override ?? ""} placeholder="9 (por defecto)"
-                key={selected.id}
-                onBlur={(e) => updateCompany(selected.id, { wacc_override: e.target.value === "" ? null : Number(e.target.value) })}
-              />
-              <div className="card-sub">% · deja en blanco para usar 9%</div>
-            </div>
           </div>
 
           {!selected.target1 && nowData && (nowData.grahamNumber != null || nowData.grahamGrowth != null) && (
@@ -552,12 +547,17 @@ export default function Analysis({ session }) {
                 <div style={{ fontWeight: 700, marginBottom: 8, color: triggeredSevere.length > 0 ? "var(--loss)" : anyTriggered ? "var(--gold)" : "var(--gain)" }}>
                   {triggeredSevere.length > 0 ? "⚠️ Posible trampa de valor" : anyTriggered ? "Alguna señal de alerta" : "Sin señales de trampa de valor"}
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {valueTraps.map((c) => (
-                    <div key={c.id} style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "baseline" }}>
-                      <span style={{ minWidth: 18 }}>{!c.available ? "—" : c.severe ? "🔴" : c.triggered ? "🟡" : "🟢"}</span>
-                      <span style={{ fontWeight: 600, minWidth: 150 }}>{c.label}</span>
-                      <span style={{ color: "var(--muted)" }}>{c.detail}</span>
+                    <div key={c.id} style={{ fontSize: 12 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                        <span style={{ minWidth: 18 }}>{!c.available ? "—" : c.severe ? "🔴" : c.triggered ? "🟡" : "🟢"}</span>
+                        <span style={{ fontWeight: 600, minWidth: 150 }}>{c.label}</span>
+                        <span style={{ color: "var(--muted)" }}>{c.detail}</span>
+                      </div>
+                      {c.reminder && (
+                        <div style={{ marginLeft: 26, marginTop: 2, fontSize: 11, color: "var(--muted)", fontStyle: "italic" }}>{c.reminder}</div>
+                      )}
                     </div>
                   ))}
                 </div>
