@@ -484,6 +484,8 @@ export default function Analysis({ session }) {
             </div>
           </div>
 
+          <CompanyDescription value={selected.description} onSave={(v) => updateCompany(selected.id, { description: v })} />
+
           {/* objetivos */}
           <div
             className="cards"
@@ -892,6 +894,42 @@ function ComputedRow({ label, years, calcKey, nowData, isPct, decimals = 2, high
         );
       })}
     </tr>
+  );
+}
+
+function CompanyDescription({ value, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(value ?? "");
+  useEffect(() => { setVal(value ?? ""); }, [value]);
+
+  function commit() {
+    onSave(val.trim() === "" ? null : val.trim());
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <div style={{ marginBottom: 14 }}>
+        <textarea
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onBlur={commit}
+          placeholder="¿A qué se dedica esta empresa?"
+          rows={3}
+          autoFocus
+          style={{ width: "100%", resize: "vertical", fontSize: 13, fontFamily: "inherit" }}
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      style={{ marginBottom: 14, fontSize: 13, color: value ? "var(--text)" : "var(--muted)", fontStyle: value ? "normal" : "italic", cursor: "pointer", lineHeight: 1.5 }}
+      onClick={() => setEditing(true)}
+      title="Clic para editar"
+    >
+      {value || "+ añadir un resumen de a qué se dedica la empresa"}
+    </div>
   );
 }
 
