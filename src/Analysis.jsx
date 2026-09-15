@@ -549,15 +549,15 @@ export default function Analysis({ session }) {
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {valueTraps.map((c) => (
-                    <div key={c.id} style={{ fontSize: 12 }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-                        <span style={{ minWidth: 18 }}>{!c.available ? "—" : c.severe ? "🔴" : c.triggered ? "🟡" : "🟢"}</span>
-                        <span style={{ fontWeight: 600, minWidth: 150 }}>{c.label}</span>
-                        <span style={{ color: "var(--muted)" }}>{c.detail}</span>
-                      </div>
-                      {c.reminder && (
-                        <div style={{ marginLeft: 26, marginTop: 2, fontSize: 11, color: "var(--muted)", fontStyle: "italic" }}>{c.reminder}</div>
-                      )}
+                    <div key={c.id} style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "baseline" }}>
+                      <span style={{ minWidth: 18 }}>{!c.available ? "—" : c.severe ? "🔴" : c.triggered ? "🟡" : "🟢"}</span>
+                      <span
+                        style={{ fontWeight: 600, minWidth: 150, cursor: c.reminder ? "help" : undefined, textDecoration: c.reminder ? "underline dotted" : undefined }}
+                        title={c.reminder}
+                      >
+                        {c.label}
+                      </span>
+                      <span style={{ color: "var(--muted)" }}>{c.detail}</span>
                     </div>
                   ))}
                 </div>
