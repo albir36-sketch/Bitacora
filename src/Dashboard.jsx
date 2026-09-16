@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings } from "lucide-react";
 import Analysis from "./Analysis";
 import { supabase } from "./supabaseClient";
 
@@ -261,6 +261,9 @@ function computeCurrencySummary(allTrades, allCashTx, allDividends, prices, mark
 }
 
 export default function Dashboard({ session }) {
+  const [accounts, setAccounts] = useState([]);
+  const [accountId, setAccountId] = useState(() => localStorage.getItem("bitacora_account_id") || null);
+  const [showAccountModal, setShowAccountModal] = useState(false); // false | "new" | {id, name} para renombrar
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
   const [cashTx, setCashTx] = useState([]);
@@ -290,7 +293,55 @@ export default function Dashboard({ session }) {
 
   const userId = session.user.id;
 
-  useEffect(() => { loadAll(); }, []);
+  useEffect(() => { loadAccounts(); }, []);
+
+  useEffect(() => {
+    if (!accountId) return;
+    localStorage.setItem("bitacora_account_id", accountId);
+    loadAll();
+  }, [accountId]);
+
+  async function loadAccounts() {
+    setError("");
+    const { data, error: err } = await supabase.from("accounts").select("*").order("created_at", { ascending: true });
+    if (err) { setError(err.message); setLoading(false); return; }
+    setAccounts(data || []);
+    setAccountId((prev) => {
+      if (prev && (data || []).some((a) => a.id === prev)) return prev;
+      const def = (data || []).find((a) => a.is_default) || (data || [])[0];
+      return def ? def.id : null;
+    });
+    if (!data || data.length === 0) setLoading(false);
+  }
+
+  async function addAccount(name, curr) {
+    setError("");
+    const row = { user_id: userId, name: name.trim(), currency: curr || "USD", is_default: accounts.length === 0 };
+    const { data: inserted, error: err } = await supabase.from("accounts").insert(row).select().single();
+    if (err) { setError(err.message); return; }
+    setAccounts((prev) => [...prev, inserted]);
+    setAccountId(inserted.id);
+    setShowAccountModal(false);
+  }
+
+  async function renameAccount(id, name) {
+    setError("");
+    const { error: err } = await supabase.from("accounts").update({ name: name.trim() }).eq("id", id);
+    if (err) { setError(err.message); return; }
+    setAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, name: name.trim() } : a)));
+    setShowAccountModal(false);
+  }
+
+  async function deleteAccount(id) {
+    if (accounts.length <= 1) { setError("No puedes borrar tu única cuenta."); return; }
+    setError("");
+    const { error: err } = await supabase.from("accounts").delete().eq("id", id);
+    if (err) { setError(err.message); return; }
+    const remaining = accounts.filter((a) => a.id !== id);
+    setAccounts(remaining);
+    if (accountId === id) setAccountId(remaining[0]?.id || null);
+    setShowAccountModal(false);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -320,7 +371,7 @@ export default function Dashboard({ session }) {
     let from = 0;
     let all = [];
     while (true) {
-      let query = supabase.from(table).select("*").range(from, from + pageSize - 1);
+      let query = supabase.from(table).select("*").eq("account_id", accountId).range(from, from + pageSize - 1);
       if (orderBy) query = query.order(orderBy, { ascending: true });
       const { data, error } = await query;
       if (error) throw error;
@@ -332,6 +383,7 @@ export default function Dashboard({ session }) {
   }
 
   async function loadAll() {
+    if (!accountId) return;
     setLoading(true);
     setError("");
     try {
@@ -371,7 +423,7 @@ export default function Dashboard({ session }) {
   async function addTrade(data) {
     setError("");
     const row = {
-      user_id: userId, type: data.type, ticker: data.ticker, date: data.date, qty: data.qty,
+      user_id: userId, account_id: accountId, type: data.type, ticker: data.ticker, date: data.date, qty: data.qty,
       price: data.price ?? null, action: data.action ?? null, legs: data.legs ?? null,
       status: data.type === "option" ? "open" : null, notes: data.notes || null,
       commission: data.commission ?? 0, expiration: data.expiration || null,
@@ -409,7 +461,7 @@ export default function Dashboard({ session }) {
     if (!calc) { setError("No se pudo calcular la asignación de esta opción."); return; }
 
     const stockRow = {
-      user_id: userId, type: "stock", ticker: target.ticker, date: assignDate, qty: calc.shares,
+      user_id: userId, account_id: accountId, type: "stock", ticker: target.ticker, date: assignDate, qty: calc.shares,
       price: Math.round(calc.price * 100) / 100, action: calc.action, legs: null, status: null,
       commission: 0, expiration: null, currency: target.currency || "USD",
       notes: `Asignación/ejercicio de opción ${legLabel(target.legs[0])} venc. ${target.expiration || ""}`,
@@ -446,7 +498,7 @@ export default function Dashboard({ session }) {
 
     // 2) abre el nuevo tramo, encadenado al anterior
     const newRow = {
-      user_id: userId, type: "option", ticker: target.ticker, date: rollDate, qty: target.qty,
+      user_id: userId, account_id: accountId, type: "option", ticker: target.ticker, date: rollDate, qty: target.qty,
       legs: [{ action: leg.action, optionType: newLeg.optionType, strike: Number(newLeg.strike), price: Number(newLeg.price), closePrice: null }],
       status: "open", expiration: newExpiration, commission: Number(newCommission) || 0,
       notes: `Roll desde venc. ${target.expiration || ""}`, rolled_from_id: id, currency: target.currency || "USD",
@@ -471,7 +523,7 @@ export default function Dashboard({ session }) {
     setPrices((prev) => ({ ...prev, [ticker]: value }));
     const { error: err } = await supabase
       .from("current_prices")
-      .upsert({ user_id: userId, ticker, price: value }, { onConflict: "user_id,ticker" });
+      .upsert({ user_id: userId, account_id: accountId, ticker, price: value }, { onConflict: "account_id,ticker" });
     if (err) setError(err.message);
   }
 
@@ -518,7 +570,7 @@ export default function Dashboard({ session }) {
 
   async function addCashTx(data) {
     setError("");
-    const row = { user_id: userId, date: data.date, type: data.type, amount: data.amount, notes: data.notes || null, currency: data.currency || "USD" };
+    const row = { user_id: userId, account_id: accountId, date: data.date, type: data.type, amount: data.amount, notes: data.notes || null, currency: data.currency || "USD" };
     const { data: inserted, error: err } = await supabase.from("cash_transactions").insert(row).select().single();
     if (err) { setError(err.message); return; }
     setCashTx((prev) => [...prev, { id: inserted.id, date: inserted.date, type: inserted.type, amount: Number(inserted.amount), notes: inserted.notes, currency: inserted.currency || "USD" }]);
@@ -534,7 +586,7 @@ export default function Dashboard({ session }) {
   async function addDividend(data) {
     setError("");
     const row = {
-      user_id: userId, ticker: data.ticker.toUpperCase().trim(), date: data.date,
+      user_id: userId, account_id: accountId, ticker: data.ticker.toUpperCase().trim(), date: data.date,
       amount: data.amount, currency: data.currency || "USD", notes: data.notes || null,
     };
     const { data: inserted, error: err } = await supabase.from("dividends").insert(row).select().single();
@@ -551,7 +603,7 @@ export default function Dashboard({ session }) {
 
   async function addSnapshot(data) {
     setError("");
-    const row = { user_id: userId, date: data.date, value: data.value, currency: data.currency || "USD", notes: data.notes || null };
+    const row = { user_id: userId, account_id: accountId, date: data.date, value: data.value, currency: data.currency || "USD", notes: data.notes || null };
     const { data: inserted, error: err } = await supabase.from("account_snapshots").insert(row).select().single();
     if (err) { setError(err.message); return; }
     setSnapshots((prev) => [...prev, { id: inserted.id, date: inserted.date, value: Number(inserted.value), currency: inserted.currency || "USD", notes: inserted.notes }]);
@@ -977,6 +1029,14 @@ export default function Dashboard({ session }) {
     return <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><span className="mono" style={{ color: "var(--muted)" }}>Cargando bitácora…</span></div>;
   }
 
+  if (accounts.length === 0) {
+    return (
+      <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <AccountModal mode="new" accounts={[]} onCancel={() => {}} onCreate={addAccount} onRename={() => {}} onDelete={() => {}} />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <div className="header">
@@ -988,6 +1048,19 @@ export default function Dashboard({ session }) {
           </div>
         </div>
         <div className="top-actions">
+          <div className="field" style={{ minWidth: 160 }}>
+            <select
+              value={accountId || ""}
+              onChange={(e) => setAccountId(e.target.value)}
+              style={{ fontWeight: 600 }}
+              title="Cuenta activa"
+            >
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <button className="btn btn-ghost" title="Gestionar cuentas" onClick={() => setShowAccountModal(accountId ? { id: accountId, name: accounts.find((a) => a.id === accountId)?.name || "" } : "new")}>
+            <Settings size={15} />
+          </button>
           <div className="tabs" title="Divisa de los totales combinados (no oculta nada, todo se sigue viendo junto)">
             {CURRENCIES.map((c) => (
               <button key={c.code} className={`tab ${currency === c.code ? "active" : ""}`} onClick={() => setCurrency(c.code)}>{c.code}</button>
@@ -997,6 +1070,17 @@ export default function Dashboard({ session }) {
           <button className="btn btn-ghost" onClick={signOut}><LogOut size={15} /></button>
         </div>
       </div>
+
+      {showAccountModal && (
+        <AccountModal
+          mode={showAccountModal}
+          accounts={accounts}
+          onCancel={() => setShowAccountModal(false)}
+          onCreate={addAccount}
+          onRename={renameAccount}
+          onDelete={deleteAccount}
+        />
+      )}
 
       {tickerTape.length > 0 && (
         <div className="tape">
@@ -1689,6 +1773,68 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function AccountModal({ mode, accounts, onCancel, onCreate, onRename, onDelete }) {
+  const isNew = mode === "new";
+  const [name, setName] = useState(isNew ? "" : mode.name);
+  const [curr, setCurr] = useState("USD");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth: 380 }}>
+        <div className="modal-head">
+          <div className="modal-title">{isNew ? "Nueva cuenta" : "Gestionar cuenta"}</div>
+          <button className="close-btn" onClick={onCancel}><X size={18} /></button>
+        </div>
+
+        <div className="field">
+          <div className="field-label">Nombre</div>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Largo plazo, Intradía, Cuenta de mi hijo…" autoFocus />
+        </div>
+
+        {isNew && (
+          <div className="field" style={{ marginTop: 10 }}>
+            <div className="field-label">Divisa base de esta cuenta</div>
+            <select value={curr} onChange={(e) => setCurr(e.target.value)}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>)}
+            </select>
+          </div>
+        )}
+
+        <button
+          className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }}
+          onClick={() => (isNew ? onCreate(name, curr) : onRename(mode.id, name))}
+          disabled={!name.trim()}
+        >
+          {isNew ? "Crear cuenta" : "Guardar nombre"}
+        </button>
+
+        {!isNew && (
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+            {accounts.length <= 1 ? (
+              <div className="card-sub">No puedes borrar tu única cuenta.</div>
+            ) : !confirmDelete ? (
+              <button className="btn btn-ghost" style={{ color: "var(--loss)", width: "100%", justifyContent: "center" }} onClick={() => setConfirmDelete(true)}>
+                <Trash2 size={15} /> Borrar esta cuenta
+              </button>
+            ) : (
+              <div>
+                <div className="card-sub" style={{ color: "var(--loss)", marginBottom: 8 }}>
+                  Esto borra TODOS los trades, efectivo, dividendos y valores conocidos de esta cuenta, sin poder deshacerlo. ¿Seguro?
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => setConfirmDelete(false)}>Cancelar</button>
+                  <button className="btn" style={{ flex: 1, justifyContent: "center", background: "var(--loss)", color: "#fff" }} onClick={() => onDelete(mode.id)}>Sí, borrar</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
