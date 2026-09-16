@@ -149,6 +149,11 @@ function computeYearRatios(y, growthRate) {
   const grahamGrowth = (bpa != null && bpa > 0 && growthRate != null && growthRate > 0)
     ? bpa * (8.5 + 2 * growthRate)
     : null;
+  // Misma fórmula, pero con la "g" capada a un máximo del 12% — para suavizar el efecto de
+  // años de crecimiento puntualmente muy altos (y poco sostenibles) sobre el precio resultante.
+  const grahamGrowthSmoothed = (bpa != null && bpa > 0 && growthRate != null && growthRate > 0)
+    ? bpa * (8.5 + 2 * Math.min(growthRate, 12))
+    : null;
   // Ratio PEG (Peter Lynch): PER / % de crecimiento anual del beneficio. PEG=1 se considera
   // "precio justo" para lo que crece; por debajo de 1, potencialmente barata; por encima, cara.
   const pegRatio = (per != null && per > 0 && growthRate != null && growthRate > 0)
@@ -161,7 +166,7 @@ function computeYearRatios(y, growthRate) {
   const earningsYield = (ebit != null && ev) ? (ebit / ev) * 100 : null;
   const medias = (roc != null && earningsYield != null) ? (roc + earningsYield) / 2 : null;
 
-  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, grahamNumber, grahamGrowth, pegRatio, roc, earningsYield, medias, bpa };
+  return { cap, fondoManiobra, pctDeuda, acMenosPasivos, valorContableSin, valorContableCon, per, cotizacionPER10, grahamNumber, grahamGrowth, grahamGrowthSmoothed, pegRatio, roc, earningsYield, medias, bpa };
 }
 
 // ---------- criterios de cribado por "estilo de inversor" ----------
@@ -607,6 +612,10 @@ export default function Analysis({ session }) {
                     <ComputedRow
                       label="Graham modificada (crecimiento)" years={visibleYears} calcKey="grahamGrowth" nowData={nowData} decimals={2} growthRate={growthRate}
                       tooltip={`Precio razonable de Graham para empresas EN CRECIMIENTO: Beneficio por acción × (8,5 + 2×g), donde g es el % de crecimiento anual del beneficio (aquí, el histórico calculado sobre los años que tienes guardados${growthRate != null ? `: ${growthRate.toFixed(1)}%` : ""}). Mejor para negocios que crecen con fuerza y tienen poco activo tangible (tecnología, salud, farma). La "g" es una estimación basada en el pasado, no una garantía de futuro.`}
+                    />
+                    <ComputedRow
+                      label="Graham modificada (crecimiento suavizado)" years={visibleYears} calcKey="grahamGrowthSmoothed" nowData={nowData} decimals={2} growthRate={growthRate}
+                      tooltip={`Igual que la fórmula anterior, pero con la "g" limitada a un máximo del 12% (aunque el crecimiento histórico real${growthRate != null ? ` sea del ${growthRate.toFixed(1)}%` : " sea mayor"}). Sirve para no dejarte llevar por un crecimiento puntualmente muy alto y poco sostenible — compara las dos con el tiempo: si se separan mucho, es que el crecimiento histórico de la empresa está muy por encima de ese 12%.`}
                     />
                     <ComputedRow
                       label="Ratio PEG (Peter Lynch)" years={visibleYears} calcKey="pegRatio" nowData={nowData} decimals={2} growthRate={growthRate}
