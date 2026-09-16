@@ -1058,7 +1058,10 @@ export default function Dashboard({ session }) {
               {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           </div>
-          <button className="btn btn-ghost" title="Gestionar cuentas" onClick={() => setShowAccountModal(accountId ? { id: accountId, name: accounts.find((a) => a.id === accountId)?.name || "" } : "new")}>
+          <button className="btn btn-ghost" title="Nueva cuenta" onClick={() => setShowAccountModal("new")}>
+            <Plus size={15} /> Cuenta
+          </button>
+          <button className="btn btn-ghost" title="Gestionar cuenta actual" onClick={() => setShowAccountModal(accountId ? { id: accountId, name: accounts.find((a) => a.id === accountId)?.name || "" } : "new")}>
             <Settings size={15} />
           </button>
           <div className="tabs" title="Divisa de los totales combinados (no oculta nada, todo se sigue viendo junto)">
