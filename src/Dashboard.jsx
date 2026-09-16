@@ -333,6 +333,8 @@ export default function Dashboard({ session }) {
   }
 
   async function deleteAccount(id) {
+    const target = accounts.find((a) => a.id === id);
+    if (target?.is_default) { setError("Esta es tu cuenta principal y está protegida contra borrado. Si de verdad quieres borrarla, primero quítale esa protección desde \"Gestionar cuenta\"."); return; }
     if (accounts.length <= 1) { setError("No puedes borrar tu única cuenta."); return; }
     setError("");
     const { error: err } = await supabase.from("accounts").delete().eq("id", id);
@@ -341,6 +343,13 @@ export default function Dashboard({ session }) {
     setAccounts(remaining);
     if (accountId === id) setAccountId(remaining[0]?.id || null);
     setShowAccountModal(false);
+  }
+
+  async function toggleAccountProtection(id, protect) {
+    setError("");
+    const { error: err } = await supabase.from("accounts").update({ is_default: protect }).eq("id", id);
+    if (err) { setError(err.message); return; }
+    setAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, is_default: protect } : a)));
   }
 
   useEffect(() => {
@@ -1082,6 +1091,7 @@ export default function Dashboard({ session }) {
           onCreate={addAccount}
           onRename={renameAccount}
           onDelete={deleteAccount}
+          onToggleProtection={toggleAccountProtection}
         />
       )}
 
@@ -1780,11 +1790,13 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
   );
 }
 
-function AccountModal({ mode, accounts, onCancel, onCreate, onRename, onDelete }) {
+function AccountModal({ mode, accounts, onCancel, onCreate, onRename, onDelete, onToggleProtection }) {
   const isNew = mode === "new";
   const [name, setName] = useState(isNew ? "" : mode.name);
   const [curr, setCurr] = useState("USD");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const current = !isNew ? accounts.find((a) => a.id === mode.id) : null;
+  const isProtected = current?.is_default;
 
   return (
     <div className="modal-overlay">
@@ -1818,7 +1830,13 @@ function AccountModal({ mode, accounts, onCancel, onCreate, onRename, onDelete }
 
         {!isNew && (
           <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
-            {accounts.length <= 1 ? (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
+              <input type="checkbox" checked={!!isProtected} onChange={(e) => onToggleProtection(mode.id, e.target.checked)} />
+              Proteger contra borrado accidental
+            </label>
+            {isProtected ? (
+              <div className="card-sub">Esta cuenta está protegida — desmarca la casilla de arriba si de verdad quieres poder borrarla.</div>
+            ) : accounts.length <= 1 ? (
               <div className="card-sub">No puedes borrar tu única cuenta.</div>
             ) : !confirmDelete ? (
               <button className="btn btn-ghost" style={{ color: "var(--loss)", width: "100%", justifyContent: "center" }} onClick={() => setConfirmDelete(true)}>
