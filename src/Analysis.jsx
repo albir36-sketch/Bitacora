@@ -625,9 +625,18 @@ export default function Analysis({ session }) {
                     <RawRow label="Beneficio" years={visibleYears} field="profit" onDelete={deleteYear} trend="up" />
                     <RawRow label="Dividendo/acción" years={visibleYears} field="dividend_per_share" decimals={2} onDelete={deleteYear} />
                     <RawRow label="EBIT" years={visibleYears} field="ebit" onDelete={deleteYear} trend="up" />
-                    <ComputedRow label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight growthRate={growthRate} />
-                    <ComputedRow label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight growthRate={growthRate} />
-                    <ComputedRow label="Media (Fórmula Mágica)" years={visibleYears} calcKey="medias" nowData={nowData} isPct highlight bold growthRate={growthRate} />
+                    <ComputedRow
+                      label="ROC (Fórmula Mágica)" years={visibleYears} calcKey="roc" nowData={nowData} isPct highlight growthRate={growthRate}
+                      tooltip="Retorno sobre el Capital, de la Fórmula Mágica de Joel Greenblatt: EBIT / (Fondo de maniobra neto + Activos fijos netos). Mide cuánto beneficio genera la empresa por cada euro de capital que realmente necesita para operar el negocio — cuanto más alto, más eficiente es generando beneficios con poco capital."
+                    />
+                    <ComputedRow
+                      label="Earnings Yield (Fórmula Mágica)" years={visibleYears} calcKey="earningsYield" nowData={nowData} isPct highlight growthRate={growthRate}
+                      tooltip="Rentabilidad por beneficio, de la Fórmula Mágica de Greenblatt: EBIT / Valor de empresa (Capitalización + deudas − caja). Es como un PER invertido pero usando el valor de empresa en vez de solo la capitalización, así que sí tiene en cuenta la deuda. Cuanto más alto, más barata está la empresa en relación a lo que gana."
+                    />
+                    <ComputedRow
+                      label="Media (Fórmula Mágica)" years={visibleYears} calcKey="medias" nowData={nowData} isPct highlight bold growthRate={growthRate}
+                      tooltip="Media entre el ROC y el Earnings Yield. Greenblatt combinaba estos dos ratios para clasificar empresas: busca compañías buenas (ROC alto, es decir, negocios eficientes) Y baratas (Earnings Yield alto, es decir, precio bajo en relación al beneficio) al mismo tiempo — ni solo baratas, ni solo buenas."
+                    />
                   </tbody>
                 </table>
               </div>
