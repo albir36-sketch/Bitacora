@@ -175,6 +175,7 @@ function computeYearRatios(y, growthRate) {
 const INVESTORS = [
   { id: "graham", label: "Benjamin Graham (inversor defensivo)" },
   { id: "greenblatt", label: "Joel Greenblatt (Fórmula Mágica)" },
+  { id: "greenblatt_modified", label: "Fórmula Mágica modificada (ROIC + Precio/FCF)" },
   { id: "piotroski", label: "Piotroski (F-Score simplificado)" },
   { id: "buffett", label: "Warren Buffett (calidad + poca deuda)" },
   { id: "dalio", label: "Ray Dalio (ciclo económico)" },
@@ -211,15 +212,6 @@ function evaluateGraham(years, nowRatios, livePrice) {
   return checks;
 }
 
-function evaluateGreenblatt(years, nowRatios) {
-  if (years.length === 0) return [];
-  const r = nowRatios ?? computeYearRatios(years[years.length - 1]);
-  return [
-    { label: "ROC ≥ 15%", pass: r.roc != null && r.roc >= 15, detail: fmtPct(r.roc, 1) },
-    { label: "Earnings Yield ≥ 5%", pass: r.earningsYield != null && r.earningsYield >= 5, detail: fmtPct(r.earningsYield, 1) },
-  ];
-}
-
 function evaluatePiotroski(years) {
   if (years.length < 2) return [{ label: "Hacen falta al menos 2 años guardados", pass: false, detail: "—" }];
   const y1 = years[years.length - 2], y2 = years[years.length - 1]; // año anterior, último año
@@ -254,7 +246,6 @@ function evaluateBuffett(years, nowRatios) {
 function evaluateInvestor(investorId, years, nowRatios, livePrice) {
   switch (investorId) {
     case "graham": return evaluateGraham(years, nowRatios, livePrice);
-    case "greenblatt": return evaluateGreenblatt(years, nowRatios);
     case "piotroski": return evaluatePiotroski(years);
     case "buffett": return evaluateBuffett(years, nowRatios);
     default: return [];
@@ -466,6 +457,14 @@ export default function Analysis({ session }) {
             </div>
           ) : investorFilter === "dalio" ? (
             <DalioPanel companies={companies} onSelect={setSelectedId} />
+          ) : investorFilter === "greenblatt" || investorFilter === "greenblatt_modified" ? (
+            <MagicFormulaPanel
+              companies={companies}
+              allYears={allYears}
+              allPrices={allPrices}
+              variant={investorFilter === "greenblatt_modified" ? "modified" : "original"}
+              onSelect={setSelectedId}
+            />
           ) : (
             <ScreeningList
               companies={companies}
@@ -802,6 +801,89 @@ function CompanyGroup({ title, companies, color, onSelect }) {
             <div className="card-sub">{c.sector || "sin sector"}</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Fórmula Mágica (Greenblatt) y su variante modificada ----------
+// Método original de Greenblatt: se ordena la lista por cada métrica por separado, se anota el
+// PUESTO (1º, 2º, 3º...) de cada empresa en cada lista, y se suman los dos puestos. La empresa con
+// la SUMA MÁS BAJA es la mejor (está cerca del 1º puesto en ambas cosas a la vez).
+function computeMagicFormulaRanking(companies, allYears, allPrices, variant) {
+  const rows = companies.map((c) => {
+    const years = (allYears[c.id] || []).slice().sort((a, b) => a.year - b.year);
+    const last = years[years.length - 1];
+    if (!last) return null;
+    const livePrice = allPrices[c.id];
+    const shares = last.shares || 0;
+    const cap = livePrice != null ? shares * livePrice : null;
+    const r = computeYearRatios({ ...last, year_end_price: null, market_cap: cap }, null);
+
+    let metricB = null; // segunda métrica: Earnings Yield (original) o Precio/FCF (modificada)
+    if (variant === "modified") {
+      const fcf = (last.operating_cash_flow != null && last.capex != null) ? last.operating_cash_flow - last.capex : null;
+      metricB = (cap != null && fcf != null && fcf > 0) ? cap / fcf : null; // menor = más barata
+    } else {
+      metricB = r.earningsYield; // mayor = más barata
+    }
+    return { company: c, roc: r.roc, metricB, livePrice };
+  }).filter(Boolean);
+
+  const withRoc = rows.filter((x) => x.roc != null).sort((a, b) => b.roc - a.roc);
+  const withB = rows.filter((x) => x.metricB != null).sort((a, b) => (variant === "modified" ? a.metricB - b.metricB : b.metricB - a.metricB));
+  const rocRank = new Map(withRoc.map((x, i) => [x.company.id, i + 1]));
+  const bRank = new Map(withB.map((x, i) => [x.company.id, i + 1]));
+
+  return rows
+    .map((x) => {
+      const puestoRoc = rocRank.get(x.company.id) ?? null;
+      const puestoB = bRank.get(x.company.id) ?? null;
+      const combinado = (puestoRoc != null && puestoB != null) ? puestoRoc + puestoB : null;
+      return { ...x, puestoRoc, puestoB, combinado };
+    })
+    .sort((a, b) => {
+      if (a.combinado == null && b.combinado == null) return 0;
+      if (a.combinado == null) return 1;
+      if (b.combinado == null) return -1;
+      return a.combinado - b.combinado;
+    });
+}
+
+function MagicFormulaPanel({ companies, allYears, allPrices, variant, onSelect }) {
+  const rows = useMemo(() => computeMagicFormulaRanking(companies, allYears, allPrices, variant), [companies, allYears, allPrices, variant]);
+  const labelB = variant === "modified" ? "Precio / FCF" : "Earnings Yield";
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+        Método original de Greenblatt: cada empresa recibe un puesto por ROC y otro por {labelB.toLowerCase()}; se suman los dos puestos y se ordena de menor a mayor suma — la puntuación más baja es la mejor (cerca del 1º puesto en ambas cosas a la vez).
+        {variant === "modified" && " Aquí, en vez de Earnings Yield, se usa Precio/FCF (más bajo = más barata) — necesita Flujo de caja operativo y CapEx guardados en el último año."}
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Empresa</th><th>ROC</th><th>Puesto ROC</th><th>{labelB}</th><th>Puesto {labelB}</th><th>Puntuación (menor = mejor)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={r.company.id} style={{ cursor: "pointer" }} onClick={() => onSelect(r.company.id)}>
+                <td className="mono" style={{ color: "var(--muted)" }}>{i + 1}</td>
+                <td>
+                  <span style={{ fontWeight: 600 }}>{r.company.ticker}</span>
+                  <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>{r.company.company_name}</span>
+                </td>
+                <td className="mono">{r.roc != null ? fmtPct(r.roc, 1) : "—"}</td>
+                <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoRoc ?? "—"}</td>
+                <td className="mono">{r.metricB != null ? (variant === "modified" ? fmtNum(r.metricB, 2) + "x" : fmtPct(r.metricB, 1)) : "—"}</td>
+                <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoB ?? "—"}</td>
+                <td className="mono" style={{ fontWeight: 700, color: r.combinado != null ? "var(--gold)" : "var(--muted)" }}>{r.combinado ?? "faltan datos"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
