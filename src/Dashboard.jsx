@@ -136,14 +136,13 @@ function chainAccumulated(trade, tradesById) {
 function optionPnL(t, tradesById) {
   if (t.status === "rolled") return 0; // resultado diferido al siguiente eslabón de la cadena
   const legs = t.legs || [];
-  if (t.status === "assigned") {
+  if (t.status === "assigned" && legs.length === 1) {
     // la prima queda íntegramente realizada como ganancia: no hay costo de recompra, el precio del
     // strike se cobra/paga aparte, en el trade de acciones que se genera con el precio real pagado.
-    if (legs.length !== 1) return 0; // los spreads no soportan asignación en esta versión
     const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
     return netPremium * t.qty * 100 - totalCommission;
   }
-  if (t.status !== "closed") return 0;
+  if (t.status !== "closed" && t.status !== "assigned") return 0;
   if (legs.length === 1) {
     const { netPremium, totalCommission } = chainAccumulated(t, tradesById || {});
     const leg = legs[0];
@@ -151,7 +150,9 @@ function optionPnL(t, tradesById) {
     const finalNet = netPremium - sign * (leg.closePrice || 0);
     return finalNet * t.qty * 100 - totalCommission - (t.closeCommission || 0);
   }
-  // spreads de varias patas: no soportan roll, se calcula como antes
+  // spreads de varias patas: no soportan roll, se calcula directamente con precio de apertura/cierre
+  // de cada pata (incluye el caso "assigned" cuando, como aquí, ambas patas ya tienen closePrice
+  // conocido — no es una asignación real con entrega de acciones, solo quedó así etiquetado).
   const perContract = legs.reduce((s, l) => s + legPnL(l), 0);
   return perContract * t.qty * 100 - (t.commission || 0) - (t.closeCommission || 0);
 }
