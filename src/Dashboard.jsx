@@ -787,14 +787,23 @@ export default function Dashboard({ session }) {
   // aunque hayan generado estas mismas acciones: pagar prima es una apuesta direccional, no una
   // estrategia de ingreso, y no debe subir el precio medio de las acciones. Tampoco las simplemente
   // CERRADAS sin asignación ni los "rolled" intermedios: no generaron estas acciones.
+  // Si ya vendiste PARTE de las acciones que en su día llegaron por una asignación, esa parte de la
+  // prima ya "se fue" con esas acciones vendidas — no debe seguir rebajando el costo de las que
+  // todavía tienes. Como no hay un enlace directo entre cada opción asignada y las acciones exactas
+  // que generó, se prorratea la prima total del ticker por la fracción de acciones que aún conservas
+  // sobre el total que compraste alguna vez (comprado - lo que ya vendiste) / comprado.
   const tickerAdjusted = useMemo(() => {
     const optMap = {};
     const divMap = {};
+    const totalBoughtByTicker = {};
+    for (const t of stockTrades) if (t.action === "buy") totalBoughtByTicker[t.ticker] = (totalBoughtByTicker[t.ticker] || 0) + t.qty;
     for (const t of openOptions) if (isCreditOption(t)) optMap[t.ticker] = (optMap[t.ticker] || 0) + openOptionPremium(t);
     for (const t of assignedOptions) if (isCreditOption(t)) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
     for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
-      const optIncome = optMap[p.ticker] || 0;
+      const totalBought = totalBoughtByTicker[p.ticker] || p.shares;
+      const keptFraction = totalBought > 0 ? Math.min(1, p.shares / totalBought) : 1;
+      const optIncome = (optMap[p.ticker] || 0) * keptFraction;
       const divIncome = divMap[p.ticker] || 0;
       const totalIncome = optIncome + divIncome;
       const adjustedAvg = p.avgCost - totalIncome / p.shares;
@@ -804,7 +813,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, openOptions, assignedOptions, tradesById, dividends, prices]);
+  }, [openPositions, openOptions, assignedOptions, stockTrades, tradesById, dividends, prices]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
@@ -1538,7 +1547,7 @@ export default function Dashboard({ session }) {
             <div className="panel-title">Precio medio ajustado por ticker (acciones y ETFs)</div>
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            El precio medio ajustado descuenta, de tu costo de compra, las primas <strong style={{ color: "var(--text)" }}>cobradas</strong> (opciones vendidas) que siguen <strong style={{ color: "var(--text)" }}>abiertas</strong> o que se <strong style={{ color: "var(--text)" }}>asignaron</strong> generando estas mismas acciones (p.ej. un Cash Secured Put asignado), más los dividendos cobrados, sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las primas que tú pagaste por comprar una opción (aunque acabe ejercida) no se cuentan — es una apuesta direccional, no un ingreso que rebaje el coste. Tampoco las opciones simplemente cerradas sin asignación. El % de rendimiento total suma todo: valorización + esas primas + dividendos, sobre lo que invertiste.
+            El precio medio ajustado descuenta, de tu costo de compra, las primas <strong style={{ color: "var(--text)" }}>cobradas</strong> (opciones vendidas) que siguen <strong style={{ color: "var(--text)" }}>abiertas</strong> o que se <strong style={{ color: "var(--text)" }}>asignaron</strong> generando estas mismas acciones (p.ej. un Cash Secured Put asignado), más los dividendos cobrados, sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las primas que tú pagaste por comprar una opción (aunque acabe ejercida) no se cuentan — es una apuesta direccional, no un ingreso que rebaje el coste. Tampoco las opciones simplemente cerradas sin asignación. Si ya vendiste parte de las acciones que en su día trajo una asignación, esa parte de la prima se prorratea fuera — no sigue rebajando el costo de las que aún tienes. El % de rendimiento total suma todo: valorización + esas primas + dividendos, sobre lo que invertiste.
           </div>
           {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
