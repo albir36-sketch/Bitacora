@@ -764,18 +764,21 @@ export default function Dashboard({ session }) {
       .sort((a, b) => b.pnl - a.pnl);
   }, [closedSells, realizedOptions, sellPnlById, tradesById, dividends]);
 
-  // ---------- precio medio ajustado por ticker (primas de opciones AÚN ABIERTAS + dividendos, sobre acciones que aún tienes) ----------
+  // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que aún tienes) ----------
   // Se excluye a propósito el P&L de ventas parciales de acciones: eso ya es una realización aparte,
   // no un ingreso extra que deba "rebajar" el costo de las acciones que sigues teniendo. Los importes
   // quedan en la divisa nativa del ticker (no se combinan entre sí).
-  // Solo se cuentan las opciones que SIGUEN ABIERTAS: una vez una opción se cierra o se asigna, su
-  // resultado ya se contabilizó como P&L Realizado (por separado), así que dejarla aquí también
-  // contaría el mismo dinero dos veces. El ajuste de precio medio refleja únicamente la prima ya
-  // cobrada/pagada de coberturas que siguen en juego ahora mismo.
+  // Cuentan dos tipos de opciones:
+  //  · Las que SIGUEN ABIERTAS ahora mismo (coberturas en curso): su prima cobrada/pagada hasta ahora.
+  //  · Las ASIGNADAS: la prima que generó las acciones que tienes ahora (p.ej. un Cash Secured Put
+  //    asignado) sí rebaja el costo real de esas acciones — es justo lo que descontaste al comprarlas.
+  // Las opciones simplemente CERRADAS (recompradas o vencidas SIN asignación, o "rolled" intermedios)
+  // no tocan estas acciones: no llegaron a generarlas, así que no se cuentan aquí.
   const tickerAdjusted = useMemo(() => {
     const optMap = {};
     const divMap = {};
     for (const t of openOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + openOptionPremium(t);
+    for (const t of assignedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
     for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
       const optIncome = optMap[p.ticker] || 0;
@@ -788,7 +791,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, openOptions, dividends, prices]);
+  }, [openPositions, openOptions, assignedOptions, tradesById, dividends, prices]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
@@ -1522,14 +1525,14 @@ export default function Dashboard({ session }) {
             <div className="panel-title">Precio medio ajustado por ticker (acciones y ETFs)</div>
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones <strong style={{ color: "var(--text)" }}>todavía abiertas</strong> y los dividendos cobrados sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las opciones ya cerradas o asignadas no se cuentan aquí — su resultado ya está en el P&L Realizado. El % de rendimiento total suma todo: valorización + esas primas abiertas + dividendos, sobre lo que invertiste.
+            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones <strong style={{ color: "var(--text)" }}>todavía abiertas</strong> y las de las opciones <strong style={{ color: "var(--text)" }}>asignadas</strong> que generaron estas mismas acciones (p.ej. un Cash Secured Put asignado), más los dividendos cobrados, sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las opciones simplemente cerradas sin asignación no se cuentan — no llegaron a generar estas acciones. El % de rendimiento total suma todo: valorización + esas primas + dividendos, sobre lo que invertiste.
           </div>
           {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Compra</th><th>+ Primas abiertas</th><th>+ Dividendos</th>
+                    <th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Compra</th><th>+ Primas</th><th>+ Dividendos</th>
                     <th>$ Ajustado</th><th>% Recuperado</th><th>% Rendimiento total</th>
                   </tr>
                 </thead>
