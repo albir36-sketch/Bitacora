@@ -1720,7 +1720,6 @@ export default function Dashboard({ session }) {
             onDelete={deleteTrade}
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
-            ascending={!!tickerFilter}
           />
           {tickerFilter && (() => {
             const pos = positions.find((p) => p.ticker === tickerFilter.trim());
