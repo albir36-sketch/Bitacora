@@ -205,6 +205,16 @@ function unrealizedOptionPnL(t, markPrices) {
   if (!anyMark) return null;
   return perContract * t.qty * 100 - (t.commission || 0);
 }
+// Prima neta YA COBRADA/PAGADA (cash flow real, sin mark-to-market) de una opción TODAVÍA ABIERTA,
+// usada solo para el "precio medio ajustado": una vez la opción se cierra o se asigna, su resultado
+// pasa a formar parte del P&L Realizado (ya contabilizado ahí) y deja de tocar el precio medio de
+// las acciones que sigues teniendo — de lo contrario se estaría contando dos veces.
+function openOptionPremium(t) {
+  const legs = t.legs || [];
+  let netPremium = 0;
+  for (const l of legs) netPremium += legSign(l) * l.price;
+  return netPremium * t.qty * 100 - (t.commission || 0);
+}
 
 // Calcula el valor de cuenta (aportado + P&L total) de una divisa concreta, a partir de TODOS
 // los trades/movimientos (sin filtrar por la vista activa). Se usa para sumar el patrimonio
@@ -278,6 +288,7 @@ export default function Dashboard({ session }) {
   const [showAddCash, setShowAddCash] = useState(false);
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
+  const [tickerFilter, setTickerFilter] = useState("");
   const [period, setPeriod] = useState("mtd");
   const [dashboardPeriod, setDashboardPeriod] = useState("all");
   const [refreshing, setRefreshing] = useState(false);
@@ -745,14 +756,18 @@ export default function Dashboard({ session }) {
       .sort((a, b) => b.pnl - a.pnl);
   }, [closedSells, realizedOptions, sellPnlById, tradesById, dividends]);
 
-  // ---------- precio medio ajustado por ticker (primas de opciones + dividendos, sobre acciones que aún tienes) ----------
+  // ---------- precio medio ajustado por ticker (primas de opciones AÚN ABIERTAS + dividendos, sobre acciones que aún tienes) ----------
   // Se excluye a propósito el P&L de ventas parciales de acciones: eso ya es una realización aparte,
   // no un ingreso extra que deba "rebajar" el costo de las acciones que sigues teniendo. Los importes
   // quedan en la divisa nativa del ticker (no se combinan entre sí).
+  // Solo se cuentan las opciones que SIGUEN ABIERTAS: una vez una opción se cierra o se asigna, su
+  // resultado ya se contabilizó como P&L Realizado (por separado), así que dejarla aquí también
+  // contaría el mismo dinero dos veces. El ajuste de precio medio refleja únicamente la prima ya
+  // cobrada/pagada de coberturas que siguen en juego ahora mismo.
   const tickerAdjusted = useMemo(() => {
     const optMap = {};
     const divMap = {};
-    for (const t of realizedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of openOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + openOptionPremium(t);
     for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
       const optIncome = optMap[p.ticker] || 0;
@@ -765,7 +780,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, realizedOptions, dividends, tradesById, prices]);
+  }, [openPositions, openOptions, dividends, prices]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
@@ -1499,14 +1514,14 @@ export default function Dashboard({ session }) {
             <div className="panel-title">Precio medio ajustado por ticker (acciones y ETFs)</div>
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones cerradas y los dividendos cobrados sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. El % de rendimiento total suma todo: valorización + primas + dividendos, sobre lo que invertiste.
+            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones <strong style={{ color: "var(--text)" }}>todavía abiertas</strong> y los dividendos cobrados sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las opciones ya cerradas o asignadas no se cuentan aquí — su resultado ya está en el P&L Realizado. El % de rendimiento total suma todo: valorización + esas primas abiertas + dividendos, sobre lo que invertiste.
           </div>
           {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Compra</th><th>+ Primas</th><th>+ Dividendos</th>
+                    <th>Ticker</th><th>Divisa</th><th>Acciones</th><th>$ Compra</th><th>+ Primas abiertas</th><th>+ Dividendos</th>
                     <th>$ Ajustado</th><th>% Recuperado</th><th>% Rendimiento total</th>
                   </tr>
                 </thead>
@@ -1657,7 +1672,23 @@ export default function Dashboard({ session }) {
         <div className="panel">
           <div className="panel-head">
             <div className="panel-title">Historial de trades</div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                <Search size={14} style={{ position: "absolute", left: 8, color: "var(--muted)" }} />
+                <input
+                  type="text"
+                  value={tickerFilter}
+                  onChange={(e) => setTickerFilter(e.target.value.toUpperCase())}
+                  placeholder="Buscar ticker…"
+                  className="price-input"
+                  style={{ paddingLeft: 28, width: 130 }}
+                />
+                {tickerFilter && (
+                  <button className="icon-btn" style={{ position: "absolute", right: 4, color: "var(--muted)" }} title="Limpiar" onClick={() => setTickerFilter("")}>
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
               {openOptions.length > 0 && (
                 <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 13 }} disabled={refreshing} onClick={() => refreshOptionPrices(openOptions)}>
                   {refreshing ? "Actualizando…" : "Actualizar opciones"}
@@ -1674,6 +1705,7 @@ export default function Dashboard({ session }) {
           </div>
           <TradeTable
             trades={trades.filter((t) => {
+              if (tickerFilter && t.ticker !== tickerFilter.trim()) return false;
               const isOpen = t.type === "option"
                 ? (t.status !== "closed" && t.status !== "assigned" && t.status !== "rolled")
                 : (t.action === "buy" && (lotRemainingByTradeId[t.id] || 0) > 0.0001);
@@ -1688,7 +1720,18 @@ export default function Dashboard({ session }) {
             onDelete={deleteTrade}
             onClose={(t) => setClosingTrade(t)}
             onReopen={reopenTrade}
+            ascending={!!tickerFilter}
           />
+          {tickerFilter && (() => {
+            const pos = positions.find((p) => p.ticker === tickerFilter.trim());
+            if (!pos || pos.shares <= 0) return null;
+            return (
+              <div className="mono" style={{ fontSize: 12, color: "var(--muted)", marginTop: 10 }}>
+                Posición abierta de <span style={{ color: "var(--text)" }}>{pos.ticker}</span>: {pos.shares} acciones ·
+                {" "}$ promedio actual: <span style={{ color: "var(--text)" }}>{fmtCur(pos.avgCost, pos.currency)}</span>
+              </div>
+            );
+          })()}
         </div>
         )}
 
@@ -1724,9 +1767,9 @@ export default function Dashboard({ session }) {
   );
 }
 
-function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingByTradeId, onDelete, onClose, onReopen }) {
+function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingByTradeId, onDelete, onClose, onReopen, ascending }) {
   if (trades.length === 0) return <div className="empty">No hay trades en esta vista</div>;
-  const sorted = [...trades].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const sorted = [...trades].sort((a, b) => ascending ? new Date(a.date) - new Date(b.date) : new Date(b.date) - new Date(a.date));
   const todayStr = localDateStr(new Date());
   return (
     <div className="table-wrap">
