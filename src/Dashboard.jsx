@@ -2215,6 +2215,13 @@ function CloseModal({ trade, onCancel, onSave, onAssign, onRoll, tradesById }) {
             >
               Confirmar cierre
             </button>
+            <button
+              className="btn btn-ghost" style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
+              title="Todas las patas venden/expiran a $0 (sin valor), sin comisión de cierre"
+              onClick={() => onSave(date, (trade.legs || []).map(() => "0"), "0")}
+            >
+              Venció sin valor (cierre a $0)
+            </button>
           </>
         )}
 
