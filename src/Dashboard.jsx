@@ -213,6 +213,17 @@ function unrealizedOptionPnL(t, markPrices) {
   if (!anyMark) return null;
   return perContract * t.qty * 100 - (t.commission || 0);
 }
+// ¿Se abrió esta opción cobrando prima neta (crédito), o pagándola (débito)? Para el "precio medio
+// ajustado" solo interesan las que generaron INGRESO al abrirlas (vender un CSP, una Covered Call, un
+// spread neto a crédito): eso sí rebaja el coste real de las acciones. Comprar una opción (pagar
+// prima) es una apuesta direccional, no una estrategia de generar ingreso, así que aunque acabe
+// asignada/ejercida su prima pagada no debe subir el precio medio de las acciones.
+function isCreditOption(t) {
+  const legs = t.legs || [];
+  let net = 0;
+  for (const l of legs) net += legSign(l) * l.price;
+  return net > 0;
+}
 // Prima neta YA COBRADA/PAGADA (cash flow real, sin mark-to-market) de una opción TODAVÍA ABIERTA,
 // usada solo para el "precio medio ajustado": una vez la opción se cierra o se asigna, su resultado
 // pasa a formar parte del P&L Realizado (ya contabilizado ahí) y deja de tocar el precio medio de
@@ -768,17 +779,19 @@ export default function Dashboard({ session }) {
   // Se excluye a propósito el P&L de ventas parciales de acciones: eso ya es una realización aparte,
   // no un ingreso extra que deba "rebajar" el costo de las acciones que sigues teniendo. Los importes
   // quedan en la divisa nativa del ticker (no se combinan entre sí).
-  // Cuentan dos tipos de opciones:
-  //  · Las que SIGUEN ABIERTAS ahora mismo (coberturas en curso): su prima cobrada/pagada hasta ahora.
+  // Cuentan solo las opciones abiertas a CRÉDITO (vendidas: CSP, Covered Call, spread neto a favor):
+  //  · Las que SIGUEN ABIERTAS ahora mismo (coberturas en curso): su prima cobrada hasta ahora.
   //  · Las ASIGNADAS: la prima que generó las acciones que tienes ahora (p.ej. un Cash Secured Put
   //    asignado) sí rebaja el costo real de esas acciones — es justo lo que descontaste al comprarlas.
-  // Las opciones simplemente CERRADAS (recompradas o vencidas SIN asignación, o "rolled" intermedios)
-  // no tocan estas acciones: no llegaron a generarlas, así que no se cuentan aquí.
+  // Las opciones COMPRADAS (a débito, como una call comprada y luego ejercida) no se cuentan aquí,
+  // aunque hayan generado estas mismas acciones: pagar prima es una apuesta direccional, no una
+  // estrategia de ingreso, y no debe subir el precio medio de las acciones. Tampoco las simplemente
+  // CERRADAS sin asignación ni los "rolled" intermedios: no generaron estas acciones.
   const tickerAdjusted = useMemo(() => {
     const optMap = {};
     const divMap = {};
-    for (const t of openOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + openOptionPremium(t);
-    for (const t of assignedOptions) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of openOptions) if (isCreditOption(t)) optMap[t.ticker] = (optMap[t.ticker] || 0) + openOptionPremium(t);
+    for (const t of assignedOptions) if (isCreditOption(t)) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
     for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
       const optIncome = optMap[p.ticker] || 0;
@@ -1525,7 +1538,7 @@ export default function Dashboard({ session }) {
             <div className="panel-title">Precio medio ajustado por ticker (acciones y ETFs)</div>
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
-            El precio medio ajustado descuenta, de tu costo de compra, las primas de opciones <strong style={{ color: "var(--text)" }}>todavía abiertas</strong> y las de las opciones <strong style={{ color: "var(--text)" }}>asignadas</strong> que generaron estas mismas acciones (p.ej. un Cash Secured Put asignado), más los dividendos cobrados, sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las opciones simplemente cerradas sin asignación no se cuentan — no llegaron a generar estas acciones. El % de rendimiento total suma todo: valorización + esas primas + dividendos, sobre lo que invertiste.
+            El precio medio ajustado descuenta, de tu costo de compra, las primas <strong style={{ color: "var(--text)" }}>cobradas</strong> (opciones vendidas) que siguen <strong style={{ color: "var(--text)" }}>abiertas</strong> o que se <strong style={{ color: "var(--text)" }}>asignaron</strong> generando estas mismas acciones (p.ej. un Cash Secured Put asignado), más los dividendos cobrados, sobre las acciones o ETFs que <strong style={{ color: "var(--text)" }}>sigues teniendo</strong>. Las primas que tú pagaste por comprar una opción (aunque acabe ejercida) no se cuentan — es una apuesta direccional, no un ingreso que rebaje el coste. Tampoco las opciones simplemente cerradas sin asignación. El % de rendimiento total suma todo: valorización + esas primas + dividendos, sobre lo que invertiste.
           </div>
           {tickerAdjusted.length === 0 ? <div className="empty">Sin acciones ni ETFs en portafolio</div> : (
             <div className="table-wrap">
