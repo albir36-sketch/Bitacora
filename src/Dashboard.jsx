@@ -170,6 +170,14 @@ function assignmentStockTrade(t) {
   else action = "sell";                                                        // put comprada, ejercida
   return { action, price: leg.strike, shares };
 }
+// Precio(s) al que se hizo la operación, para la columna "Precio" del historial de trades.
+function tradePriceLabel(t) {
+  if (t.type === "stock") return t.price != null ? fmtCur(t.price, t.currency) : "—";
+  const legs = t.legs || [];
+  if (legs.length === 0) return "—";
+  if (legs.length === 1) return fmtCur(legs[0].price, t.currency);
+  return legs.map((l) => fmtCur(l.price, t.currency)).join(" / ");
+}
 function legLabel(l) {
   return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}`;
 }
@@ -1773,7 +1781,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th>Fecha</th><th>Ticker</th><th>Divisa</th><th>Tipo</th><th>Cant.</th><th>Comisión</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Ticker</th><th>Divisa</th><th>Tipo</th><th>Cant.</th><th>Precio</th><th>Comisión</th><th>Estado</th><th>P&L</th><th></th></tr></thead>
         <tbody>
           {sorted.map((t) => {
             const isOption = t.type === "option";
@@ -1802,6 +1810,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
                   {t.notes && (t.notes.startsWith("Asignación") || t.notes.startsWith("Roll")) && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
                 </td>
                 <td className="mono">{t.qty}{partial && <div style={{ fontSize: 10, color: "var(--gold)" }}>quedan {remaining}</div>}</td>
+                <td className="mono" style={{ fontSize: 12 }}>{tradePriceLabel(t)}</td>
                 <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{totalCommission > 0 ? fmtCur(totalCommission, t.currency) : "—"}</td>
                 <td>
                   <span
