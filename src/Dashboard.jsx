@@ -234,6 +234,20 @@ function openOptionPremium(t) {
   for (const l of legs) netPremium += legSign(l) * l.price;
   return netPremium * t.qty * 100 - (t.commission || 0);
 }
+// Cuántas acciones de `ticker` se tenían en cartera a fecha `dateStr` (inclusive), sumando
+// compras y restando ventas de `stockTrades` hasta ese día. Se usa para saber si una opción
+// CERRADA (no asignada) se vendió mientras ya se tenían las acciones (p.ej. una Covered Call
+// sobre acciones ya compradas) — en ese caso su prima sí cuenta en el $ Ajustado, a diferencia
+// de una opción que simplemente se cerró sin llegar a generar ni afectar ninguna acción.
+function sharesHeldAsOf(stockTrades, ticker, dateStr) {
+  let qty = 0;
+  for (const t of stockTrades) {
+    if (t.ticker !== ticker) continue;
+    if (t.date > dateStr) continue;
+    qty += t.action === "buy" ? t.qty : -t.qty;
+  }
+  return qty;
+}
 
 // Calcula el valor de cuenta (aportado + P&L total) de una divisa concreta, a partir de TODOS
 // los trades/movimientos (sin filtrar por la vista activa). Se usa para sumar el patrimonio
@@ -790,20 +804,30 @@ export default function Dashboard({ session }) {
   // Si ya vendiste PARTE de las acciones que en su día llegaron por una asignación, esa parte de la
   // prima ya "se fue" con esas acciones vendidas — no debe seguir rebajando el costo de las que
   // todavía tienes. Como no hay un enlace directo entre cada opción asignada y las acciones exactas
-  // que generó, se prorratea la prima total del ticker por la fracción de acciones que aún conservas
-  // sobre el total que compraste alguna vez (comprado - lo que ya vendiste) / comprado.
+  // que generó, se prorratea la prima de las opciones ASIGNADAS por la fracción de acciones que aún
+  // conservas sobre el total que compraste alguna vez (comprado - lo que ya vendiste) / comprado.
+  // En cambio, las opciones CERRADAS (no asignadas) que se vendieron mientras YA tenías las acciones
+  // (p.ej. una Covered Call sobre acciones que ya eran tuyas) no se prorratean: su importe ya estaba
+  // bien dimensionado a las acciones que tenías en ese momento, así que cuentan al 100%, igual que
+  // las que siguen abiertas ahora mismo.
   const tickerAdjusted = useMemo(() => {
-    const optMap = {};
+    const optAssignedMap = {};
+    const optFullMap = {};
     const divMap = {};
     const totalBoughtByTicker = {};
     for (const t of stockTrades) if (t.action === "buy") totalBoughtByTicker[t.ticker] = (totalBoughtByTicker[t.ticker] || 0) + t.qty;
-    for (const t of openOptions) if (isCreditOption(t)) optMap[t.ticker] = (optMap[t.ticker] || 0) + openOptionPremium(t);
-    for (const t of assignedOptions) if (isCreditOption(t)) optMap[t.ticker] = (optMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of openOptions) if (isCreditOption(t)) optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + openOptionPremium(t);
+    for (const t of assignedOptions) if (isCreditOption(t)) optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of closedOptions) {
+      if (!isCreditOption(t)) continue;
+      if (sharesHeldAsOf(stockTrades, t.ticker, t.date) <= 0) continue; // no tenías acciones: no cuenta
+      optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    }
     for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
     return openPositions.map((p) => {
       const totalBought = totalBoughtByTicker[p.ticker] || p.shares;
       const keptFraction = totalBought > 0 ? Math.min(1, p.shares / totalBought) : 1;
-      const optIncome = (optMap[p.ticker] || 0) * keptFraction;
+      const optIncome = (optAssignedMap[p.ticker] || 0) * keptFraction + (optFullMap[p.ticker] || 0);
       const divIncome = divMap[p.ticker] || 0;
       const totalIncome = optIncome + divIncome;
       const adjustedAvg = p.avgCost - totalIncome / p.shares;
@@ -813,7 +837,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, openOptions, assignedOptions, stockTrades, tradesById, dividends, prices]);
+  }, [openPositions, openOptions, assignedOptions, closedOptions, stockTrades, tradesById, dividends, prices]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
