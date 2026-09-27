@@ -803,13 +803,15 @@ export default function Dashboard({ session }) {
   // Se excluye a propósito el P&L de ventas parciales de acciones: eso ya es una realización aparte,
   // no un ingreso extra que deba "rebajar" el costo de las acciones que sigues teniendo. Los importes
   // quedan en la divisa nativa del ticker (no se combinan entre sí).
-  // Cuentan solo las opciones abiertas a CRÉDITO (vendidas: CSP, Covered Call, spread neto a favor):
-  //  · Las que SIGUEN ABIERTAS ahora mismo Y NO son Covered Calls (p.ej. un CSP en curso): su prima
-  //    cobrada hasta ahora, porque todavía podría acabar generando/afectando estas acciones al
-  //    asignarse. Una Covered Call TODAVÍA ABIERTA no cuenta — mientras no cierre de verdad no se sabe
-  //    si el resultado final será positivo o negativo (recomprarla cara si el valor sigue subiendo).
+  // Solo cuentan las opciones a CRÉDITO (vendidas) ya RESUELTAS de una forma u otra:
   //  · Las ASIGNADAS: la prima que generó las acciones que tienes ahora (p.ej. un Cash Secured Put
   //    asignado) sí rebaja el costo real de esas acciones — es justo lo que descontaste al comprarlas.
+  //  · Las CERRADAS que fueran Covered Calls sobre acciones que ya tenías (ver más abajo).
+  // Las que SIGUEN ABIERTAS ahora mismo (CSP en curso, Covered Call en curso, spreads...) NO cuentan
+  // todavía: hasta que no se resuelvan no se sabe si el resultado final rebajará o subirá el coste real
+  // (p.ej. una Covered Call puede acabar recomprándose cara si el valor sigue subiendo), y un Put
+  // abierto no está relacionado con las acciones que ya tienes — solo lo estará SI llega a asignarse,
+  // momento en el que pasa a contarse como asignación.
   // Las opciones COMPRADAS (a débito, como una call comprada y luego ejercida) no se cuentan aquí,
   // aunque hayan generado estas mismas acciones: pagar prima es una apuesta direccional, no una
   // estrategia de ingreso, y no debe subir el precio medio de las acciones. Tampoco las simplemente
@@ -839,11 +841,8 @@ export default function Dashboard({ session }) {
       if (!epochStart || t.date < epochStart) continue; // compra de un lote anterior ya liquidado del todo
       totalBoughtByTicker[t.ticker] = (totalBoughtByTicker[t.ticker] || 0) + t.qty;
     }
-    for (const t of openOptions) {
-      if (!isCreditOption(t)) continue;
-      if (isCoveredCallLike(t)) continue; // Covered Call TODAVÍA abierta: no cuenta hasta que cierre de verdad
-      optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + openOptionPremium(t);
-    }
+    // Las opciones TODAVÍA ABIERTAS no cuentan: mientras no se resuelvan (cierre o asignación) no se
+    // sabe si el resultado final rebajará o subirá el coste real, así que no se anticipa aquí.
     for (const t of assignedOptions) {
       if (!isCreditOption(t)) continue;
       const epochStart = currentEpochStart(stockTrades, t.ticker);
