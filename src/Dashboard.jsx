@@ -840,7 +840,11 @@ export default function Dashboard({ session }) {
     for (const t of assignedOptions) {
       if (!isCreditOption(t)) continue;
       const epochStart = currentEpochStart(stockTrades, t.ticker);
-      if (!epochStart || t.date < epochStart) continue; // asignación de un lote anterior ya liquidado del todo
+      // Se compara con la fecha de CIERRE/asignación (cuando de verdad se generan/afectan las
+      // acciones), no con la de apertura: una opción puede abrirse semanas antes de ser asignada,
+      // incluso antes de que exista todavía el lote de acciones que esa misma asignación crea.
+      const settleDate = t.closeDate || t.date;
+      if (!epochStart || settleDate < epochStart) continue; // asignación de un lote anterior ya liquidado del todo
       optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + optionPnL(t, tradesById);
     }
     for (const t of closedOptions) {
