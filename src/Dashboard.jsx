@@ -815,21 +815,34 @@ export default function Dashboard({ session }) {
   // prima ya "se fue" con esas acciones vendidas — no debe seguir rebajando el costo de las que
   // todavía tienes. Como no hay un enlace directo entre cada opción asignada y las acciones exactas
   // que generó, se prorratea la prima de las opciones ASIGNADAS por la fracción de acciones que aún
-  // conservas sobre el total que compraste alguna vez (comprado - lo que ya vendiste) / comprado.
+  // conservas sobre el total comprado — pero solo dentro del lote de acciones ACTUAL: ni las compras
+  // ni las asignaciones de un lote anterior que ya se vendió del todo entran en esta cuenta.
   // En cambio, las Covered Calls CERRADAS (no asignadas) que se vendieron mientras YA tenías las
   // acciones no se prorratean: su importe ya estaba bien dimensionado a las acciones que tenías en
   // ese momento, así que cuentan al 100%, igual que las que siguen abiertas ahora mismo. Solo cuentan
   // si (a) son CALLS —un PUT vendido mientras tenías acciones no está relacionado con ellas— y (b)
   // pertenecen al lote de acciones que tienes AHORA MISMO: si en el pasado vendiste todo y volviste a
   // comprar más tarde, las Covered Calls del lote antiguo (ya liquidado) no cuentan para el nuevo.
+  // Los DIVIDENDOS se filtran con el mismo criterio de "lote actual": un dividendo cobrado sobre
+  // acciones que ya vendiste del todo antes de volver a comprar no debe rebajar el coste de las nuevas.
   const tickerAdjusted = useMemo(() => {
     const optAssignedMap = {};
     const optFullMap = {};
     const divMap = {};
     const totalBoughtByTicker = {};
-    for (const t of stockTrades) if (t.action === "buy") totalBoughtByTicker[t.ticker] = (totalBoughtByTicker[t.ticker] || 0) + t.qty;
+    for (const t of stockTrades) {
+      if (t.action !== "buy") continue;
+      const epochStart = currentEpochStart(stockTrades, t.ticker);
+      if (!epochStart || t.date < epochStart) continue; // compra de un lote anterior ya liquidado del todo
+      totalBoughtByTicker[t.ticker] = (totalBoughtByTicker[t.ticker] || 0) + t.qty;
+    }
     for (const t of openOptions) if (isCreditOption(t)) optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + openOptionPremium(t);
-    for (const t of assignedOptions) if (isCreditOption(t)) optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    for (const t of assignedOptions) {
+      if (!isCreditOption(t)) continue;
+      const epochStart = currentEpochStart(stockTrades, t.ticker);
+      if (!epochStart || t.date < epochStart) continue; // asignación de un lote anterior ya liquidado del todo
+      optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + optionPnL(t, tradesById);
+    }
     for (const t of closedOptions) {
       if (!isCreditOption(t)) continue;
       if (!isCoveredCallLike(t)) continue; // solo calls: un put cerrado no rebaja el coste de las acciones
@@ -837,7 +850,11 @@ export default function Dashboard({ session }) {
       if (!epochStart || t.date < epochStart) continue; // pertenece a un lote ya vendido del todo, no al actual
       optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + optionPnL(t, tradesById);
     }
-    for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
+    for (const d of dividends) {
+      const epochStart = currentEpochStart(stockTrades, d.ticker);
+      if (!epochStart || d.date < epochStart) continue; // dividendo de un lote ya vendido del todo: no cuenta
+      divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
+    }
     return openPositions.map((p) => {
       const totalBought = totalBoughtByTicker[p.ticker] || p.shares;
       const keptFraction = totalBought > 0 ? Math.min(1, p.shares / totalBought) : 1;
