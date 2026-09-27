@@ -234,19 +234,29 @@ function openOptionPremium(t) {
   for (const l of legs) netPremium += legSign(l) * l.price;
   return netPremium * t.qty * 100 - (t.commission || 0);
 }
-// Cuántas acciones de `ticker` se tenían en cartera a fecha `dateStr` (inclusive), sumando
-// compras y restando ventas de `stockTrades` hasta ese día. Se usa para saber si una opción
-// CERRADA (no asignada) se vendió mientras ya se tenían las acciones (p.ej. una Covered Call
-// sobre acciones ya compradas) — en ese caso su prima sí cuenta en el $ Ajustado, a diferencia
-// de una opción que simplemente se cerró sin llegar a generar ni afectar ninguna acción.
-function sharesHeldAsOf(stockTrades, ticker, dateStr) {
-  let qty = 0;
-  for (const t of stockTrades) {
-    if (t.ticker !== ticker) continue;
-    if (t.date > dateStr) continue;
-    qty += t.action === "buy" ? t.qty : -t.qty;
+// Fecha en que empezó el "lote" de acciones que tienes AHORA MISMO de `ticker`: se recorre el
+// historial de compras/ventas en orden y cada vez que la posición vuelve a 0 y luego se compra de
+// nuevo, se marca el inicio de un lote nuevo. Si en el pasado vendiste TODAS las acciones de un
+// ticker y más tarde volviste a comprar, las Covered Calls que vendiste sobre aquel lote antiguo
+// (ya cerrado y liquidado) no deben rebajar el coste de las acciones que tienes ahora — son lotes
+// distintos, sin relación entre sí.
+function currentEpochStart(stockTrades, ticker) {
+  const sorted = stockTrades.filter((t) => t.ticker === ticker).sort((a, b) => new Date(a.date) - new Date(b.date));
+  let running = 0;
+  let epochStart = null;
+  for (const t of sorted) {
+    if (running <= 0.0001 && t.action === "buy") epochStart = t.date;
+    running += t.action === "buy" ? t.qty : -t.qty;
   }
-  return qty;
+  return epochStart;
+}
+// Solo cuenta como "Covered Call sobre acciones que ya tenías" si TODAS las patas son CALLS
+// vendidas. Un PUT vendido mientras ya tenías acciones de ese ticker (p.ej. un Cash Secured Put
+// para comprar más, o simplemente otro naked put del mismo valor) no está relacionado con esas
+// acciones concretas y no debe rebajar su coste — es una apuesta/estrategia aparte.
+function isCoveredCallLike(t) {
+  const legs = t.legs || [];
+  return legs.length > 0 && legs.every((l) => l.optionType === "call");
 }
 
 // Calcula el valor de cuenta (aportado + P&L total) de una divisa concreta, a partir de TODOS
@@ -806,10 +816,12 @@ export default function Dashboard({ session }) {
   // todavía tienes. Como no hay un enlace directo entre cada opción asignada y las acciones exactas
   // que generó, se prorratea la prima de las opciones ASIGNADAS por la fracción de acciones que aún
   // conservas sobre el total que compraste alguna vez (comprado - lo que ya vendiste) / comprado.
-  // En cambio, las opciones CERRADAS (no asignadas) que se vendieron mientras YA tenías las acciones
-  // (p.ej. una Covered Call sobre acciones que ya eran tuyas) no se prorratean: su importe ya estaba
-  // bien dimensionado a las acciones que tenías en ese momento, así que cuentan al 100%, igual que
-  // las que siguen abiertas ahora mismo.
+  // En cambio, las Covered Calls CERRADAS (no asignadas) que se vendieron mientras YA tenías las
+  // acciones no se prorratean: su importe ya estaba bien dimensionado a las acciones que tenías en
+  // ese momento, así que cuentan al 100%, igual que las que siguen abiertas ahora mismo. Solo cuentan
+  // si (a) son CALLS —un PUT vendido mientras tenías acciones no está relacionado con ellas— y (b)
+  // pertenecen al lote de acciones que tienes AHORA MISMO: si en el pasado vendiste todo y volviste a
+  // comprar más tarde, las Covered Calls del lote antiguo (ya liquidado) no cuentan para el nuevo.
   const tickerAdjusted = useMemo(() => {
     const optAssignedMap = {};
     const optFullMap = {};
@@ -820,7 +832,9 @@ export default function Dashboard({ session }) {
     for (const t of assignedOptions) if (isCreditOption(t)) optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + optionPnL(t, tradesById);
     for (const t of closedOptions) {
       if (!isCreditOption(t)) continue;
-      if (sharesHeldAsOf(stockTrades, t.ticker, t.date) <= 0) continue; // no tenías acciones: no cuenta
+      if (!isCoveredCallLike(t)) continue; // solo calls: un put cerrado no rebaja el coste de las acciones
+      const epochStart = currentEpochStart(stockTrades, t.ticker);
+      if (!epochStart || t.date < epochStart) continue; // pertenece a un lote ya vendido del todo, no al actual
       optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + optionPnL(t, tradesById);
     }
     for (const d of dividends) divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
