@@ -818,10 +818,12 @@ export default function Dashboard({ session }) {
   // CERRADAS sin asignación ni los "rolled" intermedios: no generaron estas acciones.
   // Si ya vendiste PARTE de las acciones que en su día llegaron por una asignación, esa parte de la
   // prima ya "se fue" con esas acciones vendidas — no debe seguir rebajando el costo de las que
-  // todavía tienes. Como no hay un enlace directo entre cada opción asignada y las acciones exactas
-  // que generó, se prorratea la prima de las opciones ASIGNADAS por la fracción de acciones que aún
-  // conservas sobre el total comprado — pero solo dentro del lote de acciones ACTUAL: ni las compras
-  // ni las asignaciones de un lote anterior que ya se vendió del todo entran en esta cuenta.
+  // todavía tienes. Cuando se puede enlazar sin ambigüedad la asignación con el trade de acciones
+  // EXACTO que generó, se usa la fracción de ESE lote FIFO concreto que aún conservas (más preciso:
+  // dos asignaciones distintas del mismo ticker son operaciones independientes, no un fondo común).
+  // Si no hay un enlace inequívoco (varios candidatos), se cae de vuelta a prorratear por la fracción
+  // de acciones que aún conservas sobre el total comprado — solo dentro del lote de acciones ACTUAL:
+  // ni las compras ni las asignaciones de un lote anterior que ya se vendió del todo entran en esta cuenta.
   // En cambio, las Covered Calls CERRADAS (no asignadas) que se vendieron mientras YA tenías las
   // acciones no se prorratean: su importe ya estaba bien dimensionado a las acciones que tenías en
   // ese momento, así que cuentan al 100%, igual que las que siguen abiertas ahora mismo. Solo cuentan
@@ -851,7 +853,25 @@ export default function Dashboard({ session }) {
       // incluso antes de que exista todavía el lote de acciones que esa misma asignación crea.
       const settleDate = t.closeDate || t.date;
       if (!epochStart || settleDate < epochStart) continue; // asignación de un lote anterior ya liquidado del todo
-      optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + optionPnL(t, tradesById);
+      const pnl = optionPnL(t, tradesById);
+      // Si dentro del lote actual hubo VARIAS asignaciones distintas (cada una generando sus propias
+      // acciones, p.ej. dos CSP asignados por separado), cada una es una operación independiente: no
+      // se reparte su prima a partes iguales entre todas, se enlaza con el trade de acciones EXACTO
+      // que generó (mismo ticker, misma fecha de asignación, mismas acciones) y se usa la fracción de
+      // ESE lote FIFO concreto que aún conservas (lotRemainingByTradeId). Solo si no hay un enlace
+      // inequívoco se cae de vuelta al reparto aproximado a nivel de ticker (más abajo).
+      const expectedShares = t.qty * 100;
+      const candidates = stockTrades.filter(
+        (s) => s.ticker === t.ticker && s.action === "buy" && s.date === settleDate && Math.abs(s.qty - expectedShares) < 0.0001
+      );
+      if (candidates.length === 1) {
+        const lot = candidates[0];
+        const remaining = lotRemainingByTradeId[lot.id] ?? 0;
+        const lotFraction = lot.qty > 0 ? Math.min(1, remaining / lot.qty) : 0;
+        optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + pnl * lotFraction;
+      } else {
+        optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + pnl;
+      }
     }
     for (const t of closedOptions) {
       if (!isCreditOption(t)) continue;
@@ -878,7 +898,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
-  }, [openPositions, openOptions, assignedOptions, closedOptions, stockTrades, tradesById, dividends, prices]);
+  }, [openPositions, openOptions, assignedOptions, closedOptions, stockTrades, tradesById, dividends, prices, lotRemainingByTradeId]);
 
   const tickerTape = [
     ...openPositions.map((p) => ({ label: p.ticker, val: fx(((prices[p.ticker] ?? p.avgCost) - p.avgCost) * p.shares, p.currency) })),
