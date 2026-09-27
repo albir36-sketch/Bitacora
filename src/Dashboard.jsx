@@ -804,7 +804,10 @@ export default function Dashboard({ session }) {
   // no un ingreso extra que deba "rebajar" el costo de las acciones que sigues teniendo. Los importes
   // quedan en la divisa nativa del ticker (no se combinan entre sí).
   // Cuentan solo las opciones abiertas a CRÉDITO (vendidas: CSP, Covered Call, spread neto a favor):
-  //  · Las que SIGUEN ABIERTAS ahora mismo (coberturas en curso): su prima cobrada hasta ahora.
+  //  · Las que SIGUEN ABIERTAS ahora mismo Y NO son Covered Calls (p.ej. un CSP en curso): su prima
+  //    cobrada hasta ahora, porque todavía podría acabar generando/afectando estas acciones al
+  //    asignarse. Una Covered Call TODAVÍA ABIERTA no cuenta — mientras no cierre de verdad no se sabe
+  //    si el resultado final será positivo o negativo (recomprarla cara si el valor sigue subiendo).
   //  · Las ASIGNADAS: la prima que generó las acciones que tienes ahora (p.ej. un Cash Secured Put
   //    asignado) sí rebaja el costo real de esas acciones — es justo lo que descontaste al comprarlas.
   // Las opciones COMPRADAS (a débito, como una call comprada y luego ejercida) no se cuentan aquí,
@@ -836,7 +839,11 @@ export default function Dashboard({ session }) {
       if (!epochStart || t.date < epochStart) continue; // compra de un lote anterior ya liquidado del todo
       totalBoughtByTicker[t.ticker] = (totalBoughtByTicker[t.ticker] || 0) + t.qty;
     }
-    for (const t of openOptions) if (isCreditOption(t)) optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + openOptionPremium(t);
+    for (const t of openOptions) {
+      if (!isCreditOption(t)) continue;
+      if (isCoveredCallLike(t)) continue; // Covered Call TODAVÍA abierta: no cuenta hasta que cierre de verdad
+      optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + openOptionPremium(t);
+    }
     for (const t of assignedOptions) {
       if (!isCreditOption(t)) continue;
       const epochStart = currentEpochStart(stockTrades, t.ticker);
