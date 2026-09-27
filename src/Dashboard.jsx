@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle } from "lucide-react";
 import Analysis from "./Analysis";
 import { supabase } from "./supabaseClient";
 
@@ -314,6 +314,100 @@ function computeCurrencySummary(allTrades, allCashTx, allDividends, prices, mark
   return { currency: curCode, accountValue: netDeposits + totalPnL };
 }
 
+// ============================================================================
+// IMPORTADOR DE INFORME DE ACTIVIDAD DE INTERACTIVE BROKERS (CSV)
+// ============================================================================
+// El "Informe de actividad" de IBKR es un único CSV con muchas secciones seguidas,
+// cada línea empieza por el nombre de la sección ("Operaciones", "Dividendos",
+// "Depósitos y retiradas"...), luego "Header" (define las columnas de esa sección
+// hasta el próximo Header) o "Data" (una fila de datos). Una misma sección puede
+// tener varios bloques de columnas distintos (p.ej. Acciones vs Forex), por eso se
+// recuerda el Header más reciente de CADA sección por separado.
+// Deliberadamente NO se importan aquí las opciones (spreads, rolls y asignaciones
+// son demasiado fáciles de enlazar mal): esas se siguen introduciendo a mano con
+// los botones de siempre. Solo se extraen movimientos de efectivo, dividendos y
+// compras/ventas de ACCIONES — y dentro de estas, se excluyen las que vienen de una
+// asignación de opción (Código contiene "A"), porque esas hay que darlas de alta
+// con el botón "Asignar" de la opción correspondiente para que quede bien enlazada.
+function parseCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuotes = false; }
+      } else cur += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+function ibkrNum(s) {
+  if (s == null || s === "" || s === "--") return null;
+  const n = Number(String(s).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+function parseIbkrStatement(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const headersBySection = {};
+  const cash = [];
+  const dividends = [];
+  const stocks = [];
+  let skippedOptionRows = 0;
+  let skippedAssignmentRows = 0;
+  for (const line of lines) {
+    const cols = parseCsvLine(line);
+    if (cols.length < 2) continue;
+    const section = cols[0].trim();
+    const kind = cols[1].trim();
+    if (kind === "Header") {
+      headersBySection[section] = cols.slice(2);
+      continue;
+    }
+    if (kind !== "Data") continue;
+    const headers = headersBySection[section];
+    if (!headers) continue;
+    const row = {};
+    headers.forEach((h, i) => { row[h.trim()] = cols[2 + i]; });
+
+    if (section === "Depósitos y retiradas") {
+      const amount = ibkrNum(row["Cantidad"]);
+      const date = (row["Fecha de liquidación"] || "").trim();
+      if (amount == null || !date) continue; // fila "Total"
+      cash.push({ date, amount: Math.abs(amount), type: amount >= 0 ? "deposit" : "withdrawal", currency: row["Divisa"] || "USD", raw: row["Descripción"] || "" });
+    } else if (section === "Dividendos") {
+      const amount = ibkrNum(row["Cantidad"]);
+      const date = (row["Fecha"] || "").trim();
+      const desc = row["Descripción"] || "";
+      const m = desc.match(/^([A-Z0-9.]+)\(/);
+      if (amount == null || !date || !m) continue; // fila "Total" u otra sin ticker reconocible
+      dividends.push({ date, ticker: m[1], amount, currency: row["Divisa"] || "USD", raw: desc });
+    } else if (section === "Operaciones") {
+      const category = row["Categoría de activo"] || "";
+      const discriminator = row["DataDiscriminator"] || "";
+      if (discriminator !== "Order") continue; // filas de subtotal/total
+      if (category !== "Acciones") { skippedOptionRows++; continue; }
+      const codigo = row["Código"] || "";
+      if (codigo.includes("A")) { skippedAssignmentRows++; continue; } // generada por asignación de opción
+      const qty = ibkrNum(row["Cantidad"]);
+      const price = ibkrNum(row["Precio trans."]);
+      const dateRaw = row["Fecha/Hora"] || "";
+      const date = dateRaw.split(",")[0].trim();
+      const commission = Math.abs(ibkrNum(row["Tarifa/com."]) ?? ibkrNum(row["Com. entrante EUR"]) ?? 0);
+      if (qty == null || price == null || !date || !row["Símbolo"]) continue;
+      stocks.push({ date, ticker: row["Símbolo"], qty: Math.abs(qty), price: Math.abs(price), action: qty >= 0 ? "buy" : "sell", commission, currency: row["Divisa"] || "USD" });
+    }
+  }
+  return { cash, dividends, stocks, skippedOptionRows, skippedAssignmentRows };
+}
+
 export default function Dashboard({ session }) {
   const [accounts, setAccounts] = useState([]);
   const [accountId, setAccountId] = useState(() => localStorage.getItem("bitacora_account_id") || null);
@@ -329,6 +423,7 @@ export default function Dashboard({ session }) {
   const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false); // false | true | {ticker, action, currency}
   const [showAddCash, setShowAddCash] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
   const [tickerFilter, setTickerFilter] = useState("");
@@ -1812,6 +1907,9 @@ export default function Dashboard({ session }) {
                   {refreshing ? "Actualizando…" : "Actualizar opciones"}
                 </button>
               )}
+              <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 13 }} title="Importar el informe de actividad (CSV) de Interactive Brokers" onClick={() => setShowImport(true)}>
+                <Upload size={14} /> Importar IBKR
+              </button>
               <div className="tabs">
                 {["open", "closed", "all"].map((k) => (
                   <button key={k} className={`tab ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>
@@ -1869,6 +1967,17 @@ export default function Dashboard({ session }) {
       {showAddCash && <AddCashModal onCancel={() => setShowAddCash(false)} onSave={addCashTx} defaultCurrency={currency} />}
       {showAddDividend && <AddDividendModal onCancel={() => setShowAddDividend(false)} onSave={addDividend} defaultCurrency={currency} />}
       {showAddSnapshot && <AddSnapshotModal onCancel={() => setShowAddSnapshot(false)} onSave={addSnapshot} defaultCurrency={currency} />}
+      {showImport && (
+        <ImportModal
+          onCancel={() => setShowImport(false)}
+          existingTrades={trades}
+          existingDividends={dividends}
+          existingCashTx={cashTx}
+          onImportCash={addCashTx}
+          onImportDividend={addDividend}
+          onImportStock={addTrade}
+        />
+      )}
       {closingTrade && (
         <CloseModal
           trade={closingTrade}
@@ -2235,6 +2344,206 @@ function AddSnapshotModal({ onCancel, onSave, defaultCurrency }) {
         </div>
 
         <button className="btn btn-gold" style={{ width: "100%", marginTop: 18, justifyContent: "center" }} onClick={submit}>Guardar valor</button>
+      </div>
+    </div>
+  );
+}
+
+// Compara con lo que ya hay en la app para no duplicar lo que se importe dos veces (p.ej. si se
+// sube el mismo informe, o informes de periodos que se solapan un poco).
+function isDupCash(c, existing) {
+  return existing.some((e) => e.date === c.date && e.type === c.type && e.currency === c.currency && Math.abs(e.amount - c.amount) < 0.01);
+}
+function isDupDividend(d, existing) {
+  return existing.some((e) => e.ticker === d.ticker && e.date === d.date && Math.abs(e.amount - d.amount) < 0.01);
+}
+function isDupStock(s, existing) {
+  return existing.some(
+    (e) => e.type === "stock" && e.ticker === s.ticker && e.date === s.date && e.action === s.action &&
+      Math.abs(e.qty - s.qty) < 0.001 && Math.abs((e.price ?? 0) - s.price) < 0.01
+  );
+}
+
+function ImportModal({ onCancel, existingTrades, existingDividends, existingCashTx, onImportCash, onImportDividend, onImportStock }) {
+  const [parsed, setParsed] = useState(null); // { cash, dividends, stocks, skippedOptionRows, skippedAssignmentRows }
+  const [checkedCash, setCheckedCash] = useState({});
+  const [checkedDiv, setCheckedDiv] = useState({});
+  const [checkedStock, setCheckedStock] = useState({});
+  const [fileName, setFileName] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [parseError, setParseError] = useState("");
+
+  function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
+    setParseError("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const result = parseIbkrStatement(String(reader.result));
+        if (result.cash.length === 0 && result.dividends.length === 0 && result.stocks.length === 0) {
+          setParseError("No se ha reconocido ningún movimiento en este archivo. ¿Es el CSV del informe de actividad (Activity Statement) de IBKR?");
+          setParsed(null);
+          return;
+        }
+        setParsed(result);
+        const initCash = {}, initDiv = {}, initStock = {};
+        result.cash.forEach((c, i) => { initCash[i] = !isDupCash(c, existingCashTx); });
+        result.dividends.forEach((d, i) => { initDiv[i] = !isDupDividend(d, existingDividends); });
+        result.stocks.forEach((s, i) => { initStock[i] = !isDupStock(s, existingTrades); });
+        setCheckedCash(initCash);
+        setCheckedDiv(initDiv);
+        setCheckedStock(initStock);
+      } catch (err) {
+        setParseError("No se ha podido leer el archivo: " + (err.message || err));
+        setParsed(null);
+      }
+    };
+    reader.readAsText(file, "utf-8");
+  }
+
+  async function doImport() {
+    setImporting(true);
+    let n = 0;
+    const totalToImport =
+      Object.values(checkedCash).filter(Boolean).length +
+      Object.values(checkedDiv).filter(Boolean).length +
+      Object.values(checkedStock).filter(Boolean).length;
+    for (let i = 0; i < parsed.cash.length; i++) {
+      if (!checkedCash[i]) continue;
+      const c = parsed.cash[i];
+      n++; setProgress(`Importando ${n}/${totalToImport}…`);
+      await onImportCash({ date: c.date, type: c.type, amount: c.amount, currency: c.currency, notes: "Importado de IBKR" });
+    }
+    for (let i = 0; i < parsed.dividends.length; i++) {
+      if (!checkedDiv[i]) continue;
+      const d = parsed.dividends[i];
+      n++; setProgress(`Importando ${n}/${totalToImport}…`);
+      await onImportDividend({ ticker: d.ticker, date: d.date, amount: d.amount, currency: d.currency, notes: "Importado de IBKR" });
+    }
+    for (let i = 0; i < parsed.stocks.length; i++) {
+      if (!checkedStock[i]) continue;
+      const s = parsed.stocks[i];
+      n++; setProgress(`Importando ${n}/${totalToImport}…`);
+      await onImportStock({ type: "stock", ticker: s.ticker, date: s.date, qty: s.qty, price: s.price, action: s.action, commission: s.commission, currency: s.currency, notes: "Importado de IBKR" });
+    }
+    setImporting(false);
+    onCancel();
+  }
+
+  const totalSelected =
+    Object.values(checkedCash).filter(Boolean).length +
+    Object.values(checkedDiv).filter(Boolean).length +
+    Object.values(checkedStock).filter(Boolean).length;
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth: 720, width: "95%" }}>
+        <div className="modal-head"><div className="modal-title">Importar informe de IBKR</div><button className="close-btn" onClick={onCancel}><X size={18} /></button></div>
+
+        {!parsed && (
+          <>
+            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 0 }}>
+              Sube el CSV del <strong>informe de actividad</strong> de Interactive Brokers (Reports / Statements → Activity → CSV).
+              Se detectan depósitos/retiradas, dividendos y compras/ventas de acciones que todavía no tengas guardados.
+              Las opciones (aperturas, cierres, rolls y asignaciones) no se importan aquí — se siguen dando de alta a mano
+              con los botones de siempre, para no enlazarlas mal.
+            </p>
+            <label className="btn btn-gold" style={{ width: "100%", justifyContent: "center", cursor: "pointer" }}>
+              <Upload size={16} /> Elegir archivo CSV
+              <input type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={handleFile} />
+            </label>
+            {parseError && (
+              <div style={{ marginTop: 12, color: "var(--loss)", fontSize: 13, display: "flex", gap: 6, alignItems: "flex-start" }}>
+                <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: 2 }} /> {parseError}
+              </div>
+            )}
+          </>
+        )}
+
+        {parsed && (
+          <>
+            <p style={{ color: "var(--muted)", fontSize: 12, marginTop: 0 }}>
+              {fileName} — se ha desmarcado lo que parece que ya tenías guardado (mismo ticker/fecha/importe).
+              Revisa antes de importar; puedes marcar o desmarcar cualquier fila.
+              {(parsed.skippedOptionRows > 0 || parsed.skippedAssignmentRows > 0) && (
+                <> Se han ignorado {parsed.skippedOptionRows + parsed.skippedAssignmentRows} filas de opciones (
+                {parsed.skippedAssignmentRows > 0 ? `${parsed.skippedAssignmentRows} de ellas asignaciones, dalas de alta con el botón "Asignar" de la opción` : "para dar de alta a mano"}).</>
+              )}
+            </p>
+
+            <ImportSection
+              title={`Efectivo (${parsed.cash.length})`}
+              rows={parsed.cash}
+              checked={checkedCash}
+              setChecked={setCheckedCash}
+              isDup={(c) => isDupCash(c, existingCashTx)}
+              renderRow={(c) => `${c.date} · ${c.type === "deposit" ? "Depósito" : "Retiro"} · ${c.amount.toFixed(2)} ${c.currency}`}
+            />
+            <ImportSection
+              title={`Dividendos (${parsed.dividends.length})`}
+              rows={parsed.dividends}
+              checked={checkedDiv}
+              setChecked={setCheckedDiv}
+              isDup={(d) => isDupDividend(d, existingDividends)}
+              renderRow={(d) => `${d.date} · ${d.ticker} · ${d.amount.toFixed(2)} ${d.currency}`}
+            />
+            <ImportSection
+              title={`Acciones (${parsed.stocks.length})`}
+              rows={parsed.stocks}
+              checked={checkedStock}
+              setChecked={setCheckedStock}
+              isDup={(s) => isDupStock(s, existingTrades)}
+              renderRow={(s) => `${s.date} · ${s.action === "buy" ? "Compra" : "Venta"} ${s.ticker} · ${s.qty} @ ${s.price} ${s.currency}`}
+            />
+
+            <button
+              className="btn btn-gold"
+              style={{ width: "100%", marginTop: 18, justifyContent: "center" }}
+              disabled={importing || totalSelected === 0}
+              onClick={doImport}
+            >
+              {importing ? progress : `Importar ${totalSelected} movimiento${totalSelected === 1 ? "" : "s"} seleccionado${totalSelected === 1 ? "" : "s"}`}
+            </button>
+            <button className="btn btn-ghost" style={{ width: "100%", marginTop: 8, justifyContent: "center" }} onClick={() => setParsed(null)} disabled={importing}>
+              Elegir otro archivo
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ImportSection({ title, rows, checked, setChecked, isDup, renderRow }) {
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{title}</div>
+      <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
+        {rows.map((r, i) => {
+          const dup = isDup(r);
+          return (
+            <label
+              key={i}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", fontSize: 12.5,
+                borderBottom: i < rows.length - 1 ? "1px solid var(--border)" : "none",
+                color: dup && !checked[i] ? "var(--muted)" : "inherit", cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={!!checked[i]}
+                onChange={(e) => setChecked((prev) => ({ ...prev, [i]: e.target.checked }))}
+              />
+              <span style={{ flex: 1 }} className="mono">{renderRow(r)}</span>
+              {dup && <span className="badge badge-closed" style={{ fontSize: 10 }}>ya existe</span>}
+            </label>
+          );
+        })}
       </div>
     </div>
   );
