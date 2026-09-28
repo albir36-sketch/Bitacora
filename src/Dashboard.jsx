@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw } from "lucide-react";
 import Analysis from "./Analysis";
 import { supabase } from "./supabaseClient";
 
@@ -431,6 +431,8 @@ export default function Dashboard({ session }) {
   const [dashboardPeriod, setDashboardPeriod] = useState("all");
   const [refreshing, setRefreshing] = useState(false);
   const [markPrices, setMarkPrices] = useState({});
+  const [autoRefresh, setAutoRefresh] = useState(() => localStorage.getItem("bitacora_autorefresh") === "1");
+  const [autoRefreshSec, setAutoRefreshSec] = useState(() => Number(localStorage.getItem("bitacora_autorefresh_sec")) || 60);
   const [view, setView] = useState("dashboard"); // "dashboard" | "portfolio" | "cash" | "trades"
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currency, setCurrency] = useState("EUR"); // divisa de los TOTALES combinados (no filtra las tablas)
@@ -1263,6 +1265,26 @@ export default function Dashboard({ session }) {
     }
   }, [loading, openOptions]);
 
+  // refs con los valores más recientes, para que el intervalo de abajo no se reinicie
+  // cada vez que cambian las posiciones/opciones abiertas
+  const openPositionsRef = useRef(openPositions);
+  useEffect(() => { openPositionsRef.current = openPositions; }, [openPositions]);
+  const openOptionsRef = useRef(openOptions);
+  useEffect(() => { openOptionsRef.current = openOptions; }, [openOptions]);
+
+  useEffect(() => { localStorage.setItem("bitacora_autorefresh", autoRefresh ? "1" : "0"); }, [autoRefresh]);
+  useEffect(() => { localStorage.setItem("bitacora_autorefresh_sec", String(autoRefreshSec)); }, [autoRefreshSec]);
+
+  useEffect(() => {
+    if (!autoRefresh || loading) return;
+    const id = setInterval(() => {
+      if (document.hidden) return; // no gastar llamadas de API si la pestaña no está a la vista
+      if (openPositionsRef.current.length > 0) refreshPrices(openPositionsRef.current.map((p) => p.ticker));
+      if (openOptionsRef.current.length > 0) refreshOptionPrices(openOptionsRef.current, true);
+    }, autoRefreshSec * 1000);
+    return () => clearInterval(id);
+  }, [autoRefresh, autoRefreshSec, loading]);
+
   if (loading) {
     return <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><span className="mono" style={{ color: "var(--muted)" }}>Cargando bitácora…</span></div>;
   }
@@ -1307,6 +1329,27 @@ export default function Dashboard({ session }) {
               <button key={c.code} className={`tab ${currency === c.code ? "active" : ""}`} onClick={() => setCurrency(c.code)}>{c.code}</button>
             ))}
           </div>
+          <button
+            className={`btn ${autoRefresh ? "btn-gold" : "btn-ghost"}`}
+            style={{ padding: "6px 10px", fontSize: 13 }}
+            title={autoRefresh ? `Auto-actualizando precios cada ${autoRefreshSec}s` : "Actualizar precios y opciones automáticamente"}
+            onClick={() => setAutoRefresh((v) => !v)}
+          >
+            <RefreshCw size={14} /> Auto
+          </button>
+          {autoRefresh && (
+            <select
+              value={autoRefreshSec}
+              onChange={(e) => setAutoRefreshSec(Number(e.target.value))}
+              title="Frecuencia de actualización"
+              style={{ fontSize: 13 }}
+            >
+              <option value={30}>30s</option>
+              <option value={60}>1 min</option>
+              <option value={120}>2 min</option>
+              <option value={300}>5 min</option>
+            </select>
+          )}
           <button className="btn btn-gold" onClick={() => setShowAdd(true)}><Plus size={16} /> Nuevo trade</button>
           <button className="btn btn-ghost" onClick={signOut}><LogOut size={15} /></button>
         </div>
