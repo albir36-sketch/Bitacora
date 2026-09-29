@@ -324,13 +324,22 @@ export default function Analysis({ session }) {
     const prices = {};
     const failures = [];
     for (const c of companies) {
-      try {
-        prices[c.id] = await fetchQuote(c.ticker);
-      } catch (e) {
-        failures.push(`${c.ticker}: ${e.message}`);
+      let done = false;
+      for (let attempt = 0; attempt < 2 && !done; attempt++) {
+        try {
+          prices[c.id] = await fetchQuote(c.ticker);
+          done = true;
+        } catch (e) {
+          if (attempt === 0 && String(e.message).startsWith("HTTP 429")) {
+            // Límite de peticiones alcanzado: esperamos más y reintentamos una vez esta misma empresa.
+            await sleep(4000);
+          } else {
+            failures.push(`${c.ticker}: ${e.message}`);
+          }
+        }
       }
-      // Espaciamos las llamadas para no chocar con el límite de la API gratuita de Finnhub (60/min).
-      await sleep(300);
+      // Espaciamos las llamadas para no chocar con el límite de la API gratuita de Finnhub (60/min = 1/seg).
+      await sleep(1100);
     }
     setAllPrices((prev) => ({ ...prev, ...prices }));
     setScreeningLoading(false);
