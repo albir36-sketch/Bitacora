@@ -6,11 +6,13 @@ const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
 
 async function fetchQuote(ticker) {
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${FINNHUB_KEY}`);
-  if (!res.ok) throw new Error(`Error al consultar ${ticker}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} al consultar ${ticker}`);
   const data = await res.json();
-  if (data.c == null || data.c === 0) throw new Error(`Sin datos para ${ticker}`);
+  if (data.c == null || data.c === 0) throw new Error(`Finnhub respondió sin cotización para ${ticker} (c=${data.c})`);
   return data.c;
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const fmtNum = (n, digits = 2) => {
   if (n == null || Number.isNaN(n)) return "—";
@@ -318,12 +320,24 @@ export default function Analysis({ session }) {
   async function refreshAllPrices() {
     if (!FINNHUB_KEY) { setError("Falta configurar VITE_FINNHUB_API_KEY en Vercel."); return; }
     setScreeningLoading(true);
+    setError("");
     const prices = {};
+    const failures = [];
     for (const c of companies) {
-      try { prices[c.id] = await fetchQuote(c.ticker); } catch (e) { /* se salta la que falle */ }
+      try {
+        prices[c.id] = await fetchQuote(c.ticker);
+      } catch (e) {
+        failures.push(`${c.ticker}: ${e.message}`);
+      }
+      // Espaciamos las llamadas para no chocar con el límite de la API gratuita de Finnhub (60/min).
+      await sleep(300);
     }
     setAllPrices((prev) => ({ ...prev, ...prices }));
     setScreeningLoading(false);
+    if (failures.length > 0) {
+      console.warn("Precios que no se pudieron actualizar:", failures);
+      setError(`No se pudo actualizar el precio de ${failures.length} empresa(s): ${failures.join(" · ")}`);
+    }
   }
 
   const selected = companies.find((c) => c.id === selectedId);
