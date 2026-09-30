@@ -178,6 +178,7 @@ const INVESTORS = [
   { id: "graham", label: "Benjamin Graham (inversor defensivo)" },
   { id: "greenblatt", label: "Joel Greenblatt (Fórmula Mágica)" },
   { id: "greenblatt_modified", label: "Fórmula Mágica modificada (ROIC + Precio/FCF)" },
+  { id: "greenblatt_combined", label: "Fórmula Mágica combinada (ROC + Earnings Yield + Precio/FCF)" },
   { id: "piotroski", label: "Piotroski (F-Score simplificado)" },
   { id: "buffett", label: "Warren Buffett (calidad + poca deuda)" },
   { id: "dalio", label: "Ray Dalio (ciclo económico)" },
@@ -480,12 +481,12 @@ export default function Analysis({ session }) {
             </div>
           ) : investorFilter === "dalio" ? (
             <DalioPanel companies={companies} onSelect={setSelectedId} />
-          ) : investorFilter === "greenblatt" || investorFilter === "greenblatt_modified" ? (
+          ) : investorFilter === "greenblatt" || investorFilter === "greenblatt_modified" || investorFilter === "greenblatt_combined" ? (
             <MagicFormulaPanel
               companies={companies}
               allYears={allYears}
               allPrices={allPrices}
-              variant={investorFilter === "greenblatt_modified" ? "modified" : "original"}
+              variant={investorFilter === "greenblatt_modified" ? "modified" : investorFilter === "greenblatt_combined" ? "combined" : "original"}
               onSelect={setSelectedId}
             />
           ) : (
@@ -829,10 +830,13 @@ function CompanyGroup({ title, companies, color, onSelect }) {
   );
 }
 
-// ---------- Fórmula Mágica (Greenblatt) y su variante modificada ----------
+// ---------- Fórmula Mágica (Greenblatt), su variante modificada y la combinada ----------
 // Método original de Greenblatt: se ordena la lista por cada métrica por separado, se anota el
-// PUESTO (1º, 2º, 3º...) de cada empresa en cada lista, y se suman los dos puestos. La empresa con
-// la SUMA MÁS BAJA es la mejor (está cerca del 1º puesto en ambas cosas a la vez).
+// PUESTO (1º, 2º, 3º...) de cada empresa en cada lista, y se suman los puestos. La empresa con
+// la SUMA MÁS BAJA es la mejor (está cerca del 1º puesto en todas las métricas a la vez).
+// variant "original": ROC + Earnings Yield (2 métricas).
+// variant "modified": ROC + Precio/FCF (2 métricas).
+// variant "combined": ROC + Earnings Yield + Precio/FCF (3 métricas) — solo puntúa si tiene las 3.
 function computeMagicFormulaRanking(companies, allYears, allPrices, variant) {
   const rows = companies.map((c) => {
     const years = (allYears[c.id] || []).slice().sort((a, b) => a.year - b.year);
@@ -843,27 +847,34 @@ function computeMagicFormulaRanking(companies, allYears, allPrices, variant) {
     const cap = livePrice != null ? shares * livePrice : null;
     const r = computeYearRatios({ ...last, year_end_price: null, market_cap: cap }, null);
 
-    let metricB = null; // segunda métrica: Earnings Yield (original) o Precio/FCF (modificada)
-    if (variant === "modified") {
-      const fcf = (last.operating_cash_flow != null && last.capex != null) ? last.operating_cash_flow - last.capex : null;
-      metricB = (cap != null && fcf != null && fcf > 0) ? cap / fcf : null; // menor = más barata
-    } else {
-      metricB = r.earningsYield; // mayor = más barata
-    }
-    return { company: c, roc: r.roc, metricB, livePrice };
+    const earningsYield = r.earningsYield; // mayor = más barata
+    const fcf = (last.operating_cash_flow != null && last.capex != null) ? last.operating_cash_flow - last.capex : null;
+    const priceFcf = (cap != null && fcf != null && fcf > 0) ? cap / fcf : null; // menor = más barata
+
+    return { company: c, roc: r.roc, earningsYield, priceFcf, livePrice };
   }).filter(Boolean);
 
   const withRoc = rows.filter((x) => x.roc != null).sort((a, b) => b.roc - a.roc);
-  const withB = rows.filter((x) => x.metricB != null).sort((a, b) => (variant === "modified" ? a.metricB - b.metricB : b.metricB - a.metricB));
+  const withEY = rows.filter((x) => x.earningsYield != null).sort((a, b) => b.earningsYield - a.earningsYield);
+  const withPFCF = rows.filter((x) => x.priceFcf != null).sort((a, b) => a.priceFcf - b.priceFcf);
   const rocRank = new Map(withRoc.map((x, i) => [x.company.id, i + 1]));
-  const bRank = new Map(withB.map((x, i) => [x.company.id, i + 1]));
+  const eyRank = new Map(withEY.map((x, i) => [x.company.id, i + 1]));
+  const pfcfRank = new Map(withPFCF.map((x, i) => [x.company.id, i + 1]));
 
   return rows
     .map((x) => {
       const puestoRoc = rocRank.get(x.company.id) ?? null;
-      const puestoB = bRank.get(x.company.id) ?? null;
-      const combinado = (puestoRoc != null && puestoB != null) ? puestoRoc + puestoB : null;
-      return { ...x, puestoRoc, puestoB, combinado };
+      const puestoEY = eyRank.get(x.company.id) ?? null;
+      const puestoPFCF = pfcfRank.get(x.company.id) ?? null;
+      let combinado = null;
+      if (variant === "original") {
+        combinado = (puestoRoc != null && puestoEY != null) ? puestoRoc + puestoEY : null;
+      } else if (variant === "modified") {
+        combinado = (puestoRoc != null && puestoPFCF != null) ? puestoRoc + puestoPFCF : null;
+      } else if (variant === "combined") {
+        combinado = (puestoRoc != null && puestoEY != null && puestoPFCF != null) ? puestoRoc + puestoEY + puestoPFCF : null;
+      }
+      return { ...x, puestoRoc, puestoEY, puestoPFCF, combinado };
     })
     .sort((a, b) => {
       if (a.combinado == null && b.combinado == null) return 0;
@@ -875,7 +886,51 @@ function computeMagicFormulaRanking(companies, allYears, allPrices, variant) {
 
 function MagicFormulaPanel({ companies, allYears, allPrices, variant, onSelect }) {
   const rows = useMemo(() => computeMagicFormulaRanking(companies, allYears, allPrices, variant), [companies, allYears, allPrices, variant]);
+
+  if (variant === "combined") {
+    return (
+      <div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+          Combina las 3 métricas: cada empresa recibe un puesto por ROC, otro por Earnings Yield y otro por Precio/FCF; se suman los 3 puestos y se ordena de menor a mayor suma — la puntuación más baja es la mejor (cerca del 1º puesto en las 3 cosas a la vez). Solo puntúan las empresas que tengan las 3 métricas disponibles (necesita EBIT y Flujo de caja operativo + CapEx del último año).
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>Empresa</th>
+                <th>ROC</th><th>Puesto ROC</th>
+                <th>Earnings Yield</th><th>Puesto EY</th>
+                <th>Precio/FCF</th><th>Puesto P/FCF</th>
+                <th>Puntuación (menor = mejor)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.company.id} style={{ cursor: "pointer" }} onClick={() => onSelect(r.company.id)}>
+                  <td className="mono" style={{ color: "var(--muted)" }}>{i + 1}</td>
+                  <td>
+                    <span style={{ fontWeight: 600 }}>{r.company.ticker}</span>
+                    <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>{r.company.company_name}</span>
+                  </td>
+                  <td className="mono">{r.roc != null ? fmtPct(r.roc, 1) : "—"}</td>
+                  <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoRoc ?? "—"}</td>
+                  <td className="mono">{r.earningsYield != null ? fmtPct(r.earningsYield, 1) : "—"}</td>
+                  <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoEY ?? "—"}</td>
+                  <td className="mono">{r.priceFcf != null ? fmtNum(r.priceFcf, 2) + "x" : "—"}</td>
+                  <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoPFCF ?? "—"}</td>
+                  <td className="mono" style={{ fontWeight: 700, color: r.combinado != null ? "var(--gold)" : "var(--muted)" }}>{r.combinado ?? "faltan datos"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
   const labelB = variant === "modified" ? "Precio / FCF" : "Earnings Yield";
+  const metricBKey = variant === "modified" ? "priceFcf" : "earningsYield";
+  const puestoBKey = variant === "modified" ? "puestoPFCF" : "puestoEY";
 
   return (
     <div>
@@ -900,8 +955,8 @@ function MagicFormulaPanel({ companies, allYears, allPrices, variant, onSelect }
                 </td>
                 <td className="mono">{r.roc != null ? fmtPct(r.roc, 1) : "—"}</td>
                 <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoRoc ?? "—"}</td>
-                <td className="mono">{r.metricB != null ? (variant === "modified" ? fmtNum(r.metricB, 2) + "x" : fmtPct(r.metricB, 1)) : "—"}</td>
-                <td className="mono" style={{ color: "var(--muted)" }}>{r.puestoB ?? "—"}</td>
+                <td className="mono">{r[metricBKey] != null ? (variant === "modified" ? fmtNum(r[metricBKey], 2) + "x" : fmtPct(r[metricBKey], 1)) : "—"}</td>
+                <td className="mono" style={{ color: "var(--muted)" }}>{r[puestoBKey] ?? "—"}</td>
                 <td className="mono" style={{ fontWeight: 700, color: r.combinado != null ? "var(--gold)" : "var(--muted)" }}>{r.combinado ?? "faltan datos"}</td>
               </tr>
             ))}
