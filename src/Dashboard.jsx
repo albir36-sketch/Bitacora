@@ -1898,7 +1898,7 @@ export default function Dashboard({ session }) {
                                   {t.expiration || "—"}
                                   {daysLeft != null && <span style={{ color: daysLeft < 0 ? "var(--loss)" : "var(--muted)", marginLeft: 6 }}>({daysLeft < 0 ? "vencida" : `${daysLeft}d`})</span>}
                                 </td>
-                                <td className="mono">{fmtCur((t.legs || []).reduce((s, l) => s + l.price, 0), t.currency)}</td>
+                                <td className="mono">{fmtCur((t.legs || []).reduce((s, l) => s + legSign(l) * l.price, 0), t.currency)}</td>
                                 <td className="mono" style={{ color: u == null ? "var(--muted)" : u >= 0 ? "var(--gain)" : "var(--loss)" }}>{u == null ? "—" : fmtCur(u, t.currency)}</td>
                                 <td>
                                   <button
