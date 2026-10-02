@@ -46,6 +46,18 @@ const fmtWeight = (n) => (n == null || Number.isNaN(n) ? "—" : `${n.toLocaleSt
 const signColor = (n) => (n == null || Number.isNaN(n) || n === 0 ? "var(--muted)" : n > 0 ? "var(--gain)" : "var(--loss)");
 const pct = (now, base) => (now == null || !base ? null : (now / base - 1) * 100);
 
+// Dividendos por acción de `ticker` con fecha ex-dividendo posterior a `from` y hasta `to` incluido
+// (`to` nulo = hasta hoy). Cobra el dividendo quien ya tenía la acción ANTES de la fecha ex-dividendo.
+// Las fechas son textos "AAAA-MM-DD", que se comparan bien como texto.
+function divsBetween(dividends, ticker, from, to) {
+  return dividends.reduce(
+    (sum, d) => (d.ticker === ticker && d.ex_date > from && (to == null || d.ex_date <= to) ? sum + Number(d.amount) : sum),
+    0
+  );
+}
+// Rentabilidad total: precio más dividendos cobrados, sobre el precio de partida.
+const totalRet = (price, divs, base) => (price == null ? null : pct(price + divs, base));
+
 export default function Experiment({ session }) {
   const userId = session.user.id;
   const [config, setConfig] = useState(null);
@@ -53,6 +65,7 @@ export default function Experiment({ session }) {
   const [prices, setPrices] = useState({}); // { ticker: { price, updated_at } }
   const [snapshots, setSnapshots] = useState([]);
   const [log, setLog] = useState([]);
+  const [dividends, setDividends] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -63,14 +76,15 @@ export default function Experiment({ session }) {
   async function loadAll() {
     setLoading(true);
     setError("");
-    const [c, p, pr, s, l] = await Promise.all([
+    const [c, p, pr, s, l, dv] = await Promise.all([
       supabase.from("experiment_config").select("*").maybeSingle(),
       supabase.from("experiment_positions").select("*").order("weight_pct", { ascending: false }),
       supabase.from("experiment_prices").select("*"),
       supabase.from("experiment_snapshots").select("*").order("date", { ascending: true }),
       supabase.from("experiment_log").select("*").order("date", { ascending: false }).order("created_at", { ascending: false }),
+      supabase.from("experiment_dividends").select("*").order("ex_date", { ascending: true }),
     ]);
-    const firstErr = [c, p, pr, s, l].find((r) => r.error);
+    const firstErr = [c, p, pr, s, l, dv].find((r) => r.error);
     if (firstErr) setError(firstErr.error.message);
     setConfig(c.data || null);
     setPositions(p.data || []);
@@ -79,6 +93,7 @@ export default function Experiment({ session }) {
     setPrices(map);
     setSnapshots(s.data || []);
     setLog(l.data || []);
+    setDividends(dv.data || []);
     setLoading(false);
   }
 
@@ -98,18 +113,21 @@ export default function Experiment({ session }) {
       const last = prices[p.ticker]?.price ?? null;
       // Precio con el que se mide la posición: el de salida si ya se vendió, el actual si sigue abierta.
       const ref = closed ? num(p.exit_price) : (last ?? entry);
-      const ret = pct(ref, entry);
+      // Dividendos por acción cobrados mientras se tuvo la posición; los índices, en ese mismo tramo.
+      const divs = divsBetween(dividends, p.ticker, p.entry_date, p.exit_date);
+      const ret = totalRet(ref, divs, entry);
       const spyRef = closed ? num(p.spy_exit) : spyNow;
       const qqqRef = closed ? num(p.qqq_exit) : qqqNow;
-      const spyRet = pct(spyRef, num(p.spy_entry));
-      const qqqRet = pct(qqqRef, num(p.qqq_entry));
+      const spyRet = totalRet(spyRef, divsBetween(dividends, "SPY", p.entry_date, p.exit_date), num(p.spy_entry));
+      const qqqRet = totalRet(qqqRef, divsBetween(dividends, "QQQ", p.entry_date, p.exit_date), num(p.qqq_entry));
       return {
-        ...p, qty, entry, closed, last, ref, ret, spyRet, qqqRet,
+        ...p, qty, entry, closed, last, ref, ret, spyRet, qqqRet, divs,
+        divCash: qty * divs,
         vsSpy: ret != null && spyRet != null ? ret - spyRet : null,
         vsQqq: ret != null && qqqRet != null ? ret - qqqRet : null,
         cost: qty * entry,
         value: qty * ref,
-        pnl: qty * (ref - entry),
+        pnl: qty * (ref - entry + divs),
         // Qué ha hecho la acción DESPUÉS de sacarla (para aprender si acertamos al vender).
         afterExit: closed ? pct(last, num(p.exit_price)) : null,
       };
@@ -117,38 +135,46 @@ export default function Experiment({ session }) {
 
     const open = rows.filter((r) => !r.closed);
     const closedRows = rows.filter((r) => r.closed);
-    const cash = startCapital - rows.reduce((s, r) => s + r.cost, 0) + closedRows.reduce((s, r) => s + r.value, 0);
+    // Los dividendos cobrados se quedan en liquidez (no se reinvierten), igual que en los índices.
+    const divTotal = rows.reduce((s, r) => s + r.divCash, 0);
+    const cash = startCapital - rows.reduce((s, r) => s + r.cost, 0) + closedRows.reduce((s, r) => s + r.value, 0) + divTotal;
     const invested = open.reduce((s, r) => s + r.value, 0);
     const total = cash + invested;
     open.forEach((r) => { r.weightNow = total ? (r.value / total) * 100 : null; });
     rows.forEach((r) => { r.contrib = startCapital ? (r.pnl / startCapital) * 100 : null; });
 
     const portRet = pct(total, startCapital);
-    const spyRet = pct(spyNow, num(config.spy_start));
-    const qqqRet = pct(qqqNow, num(config.qqq_start));
+    const spyRet = totalRet(spyNow, divsBetween(dividends, "SPY", config.start_date, null), num(config.spy_start));
+    const qqqRet = totalRet(qqqNow, divsBetween(dividends, "QQQ", config.start_date, null), num(config.qqq_start));
     const comparable = open.filter((r) => r.vsSpy != null);
 
     const stamps = Object.values(prices).map((x) => x.updated_at).filter(Boolean).sort();
     return {
-      startCapital, cash, invested, total, portRet, spyRet, qqqRet, open, closedRows,
+      startCapital, cash, invested, total, portRet, spyRet, qqqRet, open, closedRows, divTotal,
       cashWeight: total ? (cash / total) * 100 : null,
       beatSpy: comparable.filter((r) => r.vsSpy > 0).length,
       beatQqq: comparable.filter((r) => r.vsQqq > 0).length,
       nComparable: comparable.length,
       lastUpdate: stamps.length ? stamps[stamps.length - 1] : null,
     };
-  }, [config, positions, prices]);
+  }, [config, positions, prices, dividends]);
 
   const chartData = useMemo(() => {
     if (!config || snapshots.length === 0) return [];
     const cap = num(config.start_capital), spy0 = num(config.spy_start), qqq0 = num(config.qqq_start);
+    // La foto guardada es el valor SIN dividendos; aquí se suman los cobrados hasta cada fecha. Así un
+    // dividendo anotado más tarde (en la revisión mensual) corrige también los puntos antiguos.
+    const divCashUpTo = (date) => positions.reduce((sum, p) => {
+      const to = p.exit_date != null && p.exit_date < date ? p.exit_date : date;
+      return sum + num(p.qty) * divsBetween(dividends, p.ticker, p.entry_date, to);
+    }, 0);
     return snapshots.map((s) => ({
       date: fmtDate(s.date),
-      cartera: (num(s.portfolio_value) / cap) * 100,
-      spy: (num(s.spy_price) / spy0) * 100,
-      qqq: (num(s.qqq_price) / qqq0) * 100,
+      cartera: ((num(s.portfolio_value) + divCashUpTo(s.date)) / cap) * 100,
+      spy: ((num(s.spy_price) + divsBetween(dividends, "SPY", config.start_date, s.date)) / spy0) * 100,
+      qqq: ((num(s.qqq_price) + divsBetween(dividends, "QQQ", config.start_date, s.date)) / qqq0) * 100,
     }));
-  }, [config, snapshots]);
+  }, [config, snapshots, positions, dividends]);
 
   const sortedOpen = useMemo(() => {
     if (!calc) return [];
@@ -193,6 +219,7 @@ export default function Experiment({ session }) {
     const openTickers = positions.filter((p) => p.exit_date == null).map((p) => p.ticker);
     const complete = !failed.includes("SPY") && !failed.includes("QQQ") && openTickers.every((tk) => !failed.includes(tk));
     if (complete && marketDate) {
+      // Se guarda el valor SIN dividendos; el gráfico los suma al dibujar (ver chartData).
       const cap = num(config.start_capital);
       let cash = cap, invested = 0;
       positions.forEach((p) => {
@@ -238,7 +265,7 @@ export default function Experiment({ session }) {
           <div className="eyebrow">EXPERIMENTO · CARTERA TEÓRICA</div>
           <div className="h1">¿Podemos batir a los índices?</div>
           <div className="card-sub" style={{ marginTop: 4 }}>
-            Desde el {fmtDate(config.start_date)} con {fmtMoney(calc.startCapital, 0)} teóricos · sin dividendos ni comisiones, igual que los índices
+            Desde el {fmtDate(config.start_date)} con {fmtMoney(calc.startCapital, 0)} teóricos · con dividendos (sin reinvertir) y sin comisiones, igual que los índices
           </div>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -255,7 +282,7 @@ export default function Experiment({ session }) {
         <div className="card">
           <div className="card-label">Cartera</div>
           <div className="card-value big" style={{ color: signColor(calc.portRet) }}>{fmtPct(calc.portRet, 2)}</div>
-          <div className="card-sub">{fmtMoney(calc.total)} · liquidez {fmtWeight(calc.cashWeight)}</div>
+          <div className="card-sub">{fmtMoney(calc.total)} · dividendos cobrados {fmtMoney(calc.divTotal)}</div>
         </div>
         <div className="card">
           <div className="card-label">S&P 500 (SPY)</div>
@@ -351,6 +378,7 @@ export default function Experiment({ session }) {
                           <div style={{ marginTop: 4 }}>
                             Entró el {fmtDate(r.entry_date)} con un {num(r.weight_pct)}% · {r.grupo}
                             {r.motor_bucket ? ` · Motor Aprende a Invertir: ${r.motor_bucket}` : ""}
+                            {r.divs > 0 ? ` · Dividendos cobrados: ${fmtMoney(r.divs)} por acción` : ""}
                           </div>
                         </div>
                       </td>
@@ -367,7 +395,7 @@ export default function Experiment({ session }) {
           </table>
         </div>
         <div className="card-sub" style={{ marginTop: 10 }}>
-          «Vs S&P 500» y «Vs QQQ» comparan cada acción con el índice desde su propia fecha de entrada, en puntos porcentuales (pp). «Aporta» es lo que esa posición suma o resta a la rentabilidad de la cartera. Pulsa una fila para ver por qué se eligió.
+          La rentabilidad incluye los dividendos cobrados. «Vs S&P 500» y «Vs QQQ» comparan cada acción con el índice (también con sus dividendos) desde su propia fecha de entrada, en puntos porcentuales (pp). «Aporta» es lo que esa posición suma o resta a la rentabilidad de la cartera. Pulsa una fila para ver por qué se eligió.
         </div>
       </div>
 
