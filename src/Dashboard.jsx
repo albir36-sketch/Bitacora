@@ -3,8 +3,9 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical } from "lucide-react";
 import Analysis from "./Analysis";
+import Experiment from "./Experiment";
 import { supabase } from "./supabaseClient";
 
 export const CURRENCIES = [
@@ -1392,6 +1393,7 @@ export default function Dashboard({ session }) {
             { id: "cash", label: "Cuenta de efectivo", icon: Wallet },
             { id: "trades", label: "Trades", icon: ListOrdered },
             { id: "analysis", label: "Análisis", icon: Search },
+            { id: "experiment", label: "Experimento", icon: FlaskConical },
           ].map((item) => (
             <button
               key={item.id}
@@ -1994,6 +1996,7 @@ export default function Dashboard({ session }) {
         )}
 
         {view === "analysis" && <Analysis session={session} />}
+        {view === "experiment" && <Experiment session={session} />}
         </div>
       </div>
 
