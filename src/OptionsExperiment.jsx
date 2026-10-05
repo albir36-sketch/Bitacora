@@ -7,7 +7,7 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 // Experimento de opciones: cartera TEÓRICA de 10.000 $ que vende prima con riesgo definido
-// (put spreads, call spreads e iron condor) y se compara con la cartera de acciones del otro
+// (put spreads sobre empresas y sobre índices, call spreads e iron condor) y se compara con la cartera de acciones del otro
 // experimento, con el S&P 500 (SPY) y con el Nasdaq-100 (QQQ). Las operaciones se registran en
 // la base de datos en cada revisión mensual; esta vista solo lee y calcula.
 //
@@ -18,11 +18,12 @@ import { supabase } from "./supabaseClient";
 const COLORS = { opciones: "#34D399", acciones: "#E8A33D", spy: "#60A5FA", qqq: "#C084FC" };
 const STRATEGIES = [
   ["put_spread", "Put spread"],
+  ["index_put_spread", "Put spread índice"],
   ["call_spread", "Call spread"],
   ["iron_condor", "Iron condor"],
 ];
 const STRATEGY_LABEL = Object.fromEntries(STRATEGIES);
-const SIDE_LABEL = { put: "Put spreads", call: "Call spreads", condor: "Iron condor" };
+const SIDE_LABEL = { put: "Put spreads", index_put: "Put spreads sobre índice (control)", call: "Call spreads", condor: "Iron condor" };
 const EXIT_LABEL = { objetivo: "Beneficio", stop: "Stop", tiempo: "Tiempo", vencimiento: "Vencimiento", otro: "Otro" };
 const TARGET_FRACTION = 0.5; // recompra al 50 % del crédito
 const STOP_MULTIPLE = 3; // el spread vale 3 veces lo cobrado = pérdida de 2 veces el crédito
@@ -230,7 +231,7 @@ export default function OptionsExperiment({ session }) {
     if (!data?.universe.length) return null;
     const latest = data.universe.reduce((max, u) => (u.review_date > max ? u.review_date : max), "");
     const items = data.universe.filter((u) => u.review_date === latest);
-    return { date: latest, groups: ["put", "call", "condor"].map((side) => [side, items.filter((u) => u.side === side)]) };
+    return { date: latest, groups: ["put", "index_put", "call", "condor"].map((side) => [side, items.filter((u) => u.side === side)]) };
   }, [data]);
 
   if (loading) return <div className="panel"><div className="empty">Cargando experimento de opciones…</div></div>;
