@@ -3,10 +3,11 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart } from "lucide-react";
 import Analysis from "./Analysis";
 import Experiment from "./Experiment";
 import OptionsExperiment from "./OptionsExperiment";
+import EtfExperiment from "./EtfExperiment";
 import { supabase } from "./supabaseClient";
 
 export const CURRENCIES = [
@@ -1396,6 +1397,7 @@ export default function Dashboard({ session }) {
             { id: "analysis", label: "Análisis", icon: Search },
             { id: "experiment", label: "Experimento", icon: FlaskConical },
             { id: "options-experiment", label: "Exp. opciones", icon: Layers },
+            { id: "etf-experiment", label: "Exp. ETF", icon: PieChart },
           ].map((item) => (
             <button
               key={item.id}
@@ -2000,6 +2002,7 @@ export default function Dashboard({ session }) {
         {view === "analysis" && <Analysis session={session} />}
         {view === "experiment" && <Experiment session={session} />}
         {view === "options-experiment" && <OptionsExperiment session={session} />}
+        {view === "etf-experiment" && <EtfExperiment session={session} />}
         </div>
       </div>
 
