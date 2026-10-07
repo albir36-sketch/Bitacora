@@ -338,16 +338,20 @@ export default function CoveredCallExperiment({ session }) {
       </div>
 
       <div className="panel">
-        <div className="panel-head"><div className="panel-title">Calls abiertas ({calc.open.length})</div></div>
+        <div className="panel-head"><div className="panel-title">Calls abiertas, por libro</div></div>
         {calc.open.length === 0 ? (
           <div className="empty">No hay calls abiertas. Las ventas se anotan con la cadena real del día de la revisión.</div>
-        ) : (
+        ) : BOOKS.filter(([book]) => calc.open.some((r) => r.book === book)).map(([book, label]) => (
+          <div key={book} style={{ marginBottom: 18 }}>
+            <div className="card-label" style={{ marginBottom: 6 }}>
+              {book === "real" ? "Lotes reales" : `Libro «${label}»`} · {calc.open.filter((r) => r.book === book).reduce((n, r) => n + r.contracts, 0)} contratos
+            </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Call</th>
-                  <th>Libro</th>
+                  <th>Estado</th>
                   <th style={th}>Vence</th>
                   <th style={th}>Prima</th>
                   <th style={th}>Ahora</th>
@@ -358,7 +362,7 @@ export default function CoveredCallExperiment({ session }) {
                 </tr>
               </thead>
               <tbody>
-                {calc.open.map((r) => (
+                {calc.open.filter((r) => r.book === book).map((r) => (
                   <Fragment key={r.id}>
                     <tr onClick={() => toggle(r.id)} style={{ cursor: "pointer" }}>
                       <td>
@@ -368,7 +372,7 @@ export default function CoveredCallExperiment({ session }) {
                           {r.contracts > 1 ? <span style={{ color: "var(--muted)", fontSize: 13 }}>×{r.contracts}</span> : null}
                         </span>
                       </td>
-                      <td>{BOOK_LABEL[r.book]}{r.book === "real" ? (r.operated === true ? " · operada" : r.operated === false ? " · no operada" : " · pendiente") : ""}</td>
+                      <td>{r.book === "real" ? (r.operated === true ? "Operada" : r.operated === false ? "No operada" : "Pendiente") : "Teórica"}</td>
                       <td style={td}>{fmtDate(r.expiry)} · {r.dte} d</td>
                       <td style={td}>{fmtMoney(r.premium)}</td>
                       <td style={td}>{fmtMoney(r.mark)}</td>
@@ -403,9 +407,10 @@ export default function CoveredCallExperiment({ session }) {
               </tbody>
             </table>
           </div>
-        )}
+          </div>
+        ))}
         <div className="card-sub" style={{ marginTop: 10 }}>
-          «Prima» y «Ahora» son precios de la call por acción (×100 por contrato). «Resultado» ya descuenta la comisión de entrada. «Hasta el strike» es lo que puede subir la acción antes de que la call limite la ganancia; en rojo, si ya lo ha superado. Toda call se recompra en la primera revisión mensual en la que le queden 21 días o menos.
+          Cada libro es una copia independiente de la misma cartera: las calls de un libro no se suman a las del otro, y dentro de cada uno hay como mucho un contrato por cada 100 acciones. «Prima» y «Ahora» son precios de la call por acción (×100 por contrato). «Resultado» ya descuenta la comisión de entrada. «Hasta el strike» es lo que puede subir la acción antes de que la call limite la ganancia; en rojo, si ya lo ha superado. Toda call se recompra en la primera revisión mensual en la que le queden 21 días o menos.
         </div>
       </div>
 
