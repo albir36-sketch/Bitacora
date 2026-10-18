@@ -36,3 +36,8 @@ create policy "own prices select" on current_prices for select using (auth.uid()
 create policy "own prices insert" on current_prices for insert with check (auth.uid() = user_id);
 create policy "own prices update" on current_prices for update using (auth.uid() = user_id);
 create policy "own prices delete" on current_prices for delete using (auth.uid() = user_id);
+
+-- ---------- Experimento: versión de control a partes iguales (2026-10-18) ----------
+-- Mismas empresas y mismos cambios que la cartera principal, con el mismo importe en cada una.
+alter table experiment_positions add column if not exists qty_eq numeric;
+alter table experiment_snapshots add column if not exists portfolio_value_eq numeric;

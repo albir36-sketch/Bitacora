@@ -13,7 +13,7 @@ import { supabase } from "./supabaseClient";
 
 const FINNHUB_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
 const BENCHMARKS = ["SPY", "QQQ"];
-const COLORS = { cartera: "#E8A33D", spy: "#60A5FA", qqq: "#C084FC" };
+const COLORS = { cartera: "#E8A33D", eq: "#E8A33D", spy: "#60A5FA", qqq: "#C084FC" };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -108,6 +108,8 @@ export default function Experiment({ session }) {
 
     const rows = positions.map((p) => {
       const qty = num(p.qty);
+      // Cantidad en la versión de control "a partes iguales" (mismas empresas y cambios, mismo importe en cada una).
+      const qtyEq = p.qty_eq != null ? num(p.qty_eq) : null;
       const entry = num(p.entry_price);
       const closed = p.exit_date != null;
       const last = prices[p.ticker]?.price ?? null;
@@ -123,6 +125,10 @@ export default function Experiment({ session }) {
       return {
         ...p, qty, entry, closed, last, ref, ret, spyRet, qqqRet, divs,
         divCash: qty * divs,
+        qtyEq,
+        costEq: qtyEq != null ? qtyEq * entry : null,
+        valueEq: qtyEq != null ? qtyEq * ref : null,
+        divCashEq: qtyEq != null ? qtyEq * divs : null,
         vsSpy: ret != null && spyRet != null ? ret - spyRet : null,
         vsQqq: ret != null && qqqRet != null ? ret - qqqRet : null,
         cost: qty * entry,
@@ -144,13 +150,23 @@ export default function Experiment({ session }) {
     rows.forEach((r) => { r.contrib = startCapital ? (r.pnl / startCapital) * 100 : null; });
 
     const portRet = pct(total, startCapital);
+
+    // Versión a partes iguales: misma cuenta que la principal, con qty_eq en vez de qty.
+    const hasEq = rows.length > 0 && rows.every((r) => r.qtyEq != null);
+    let totalEq = null;
+    if (hasEq) {
+      const cashEq = startCapital - rows.reduce((s, r) => s + r.costEq, 0)
+        + closedRows.reduce((s, r) => s + r.valueEq, 0) + rows.reduce((s, r) => s + r.divCashEq, 0);
+      totalEq = cashEq + open.reduce((s, r) => s + r.valueEq, 0);
+    }
+    const eqRet = totalEq != null ? pct(totalEq, startCapital) : null;
     const spyRet = totalRet(spyNow, divsBetween(dividends, "SPY", config.start_date, null), num(config.spy_start));
     const qqqRet = totalRet(qqqNow, divsBetween(dividends, "QQQ", config.start_date, null), num(config.qqq_start));
     const comparable = open.filter((r) => r.vsSpy != null);
 
     const stamps = Object.values(prices).map((x) => x.updated_at).filter(Boolean).sort();
     return {
-      startCapital, cash, invested, total, portRet, spyRet, qqqRet, open, closedRows, divTotal,
+      startCapital, cash, invested, total, portRet, spyRet, qqqRet, open, closedRows, divTotal, totalEq, eqRet,
       cashWeight: total ? (cash / total) * 100 : null,
       beatSpy: comparable.filter((r) => r.vsSpy > 0).length,
       beatQqq: comparable.filter((r) => r.vsQqq > 0).length,
@@ -164,13 +180,14 @@ export default function Experiment({ session }) {
     const cap = num(config.start_capital), spy0 = num(config.spy_start), qqq0 = num(config.qqq_start);
     // La foto guardada es el valor SIN dividendos; aquí se suman los cobrados hasta cada fecha. Así un
     // dividendo anotado más tarde (en la revisión mensual) corrige también los puntos antiguos.
-    const divCashUpTo = (date) => positions.reduce((sum, p) => {
+    const divCashUpTo = (date, field) => positions.reduce((sum, p) => {
       const to = p.exit_date != null && p.exit_date < date ? p.exit_date : date;
-      return sum + num(p.qty) * divsBetween(dividends, p.ticker, p.entry_date, to);
+      return sum + num(p[field] ?? 0) * divsBetween(dividends, p.ticker, p.entry_date, to);
     }, 0);
     return snapshots.map((s) => ({
       date: fmtDate(s.date),
-      cartera: ((num(s.portfolio_value) + divCashUpTo(s.date)) / cap) * 100,
+      cartera: ((num(s.portfolio_value) + divCashUpTo(s.date, "qty")) / cap) * 100,
+      eq: s.portfolio_value_eq != null ? ((num(s.portfolio_value_eq) + divCashUpTo(s.date, "qty_eq")) / cap) * 100 : null,
       spy: ((num(s.spy_price) + divsBetween(dividends, "SPY", config.start_date, s.date)) / spy0) * 100,
       qqq: ((num(s.qqq_price) + divsBetween(dividends, "QQQ", config.start_date, s.date)) / qqq0) * 100,
     }));
@@ -221,14 +238,19 @@ export default function Experiment({ session }) {
     if (complete && marketDate) {
       // Se guarda el valor SIN dividendos; el gráfico los suma al dibujar (ver chartData).
       const cap = num(config.start_capital);
-      let cash = cap, invested = 0;
-      positions.forEach((p) => {
-        const qty = num(p.qty);
-        cash -= qty * num(p.entry_price);
-        if (p.exit_date != null) cash += qty * num(p.exit_price);
-        else invested += qty * next[p.ticker].price;
-      });
-      const row = { user_id: userId, date: marketDate, portfolio_value: cash + invested, spy_price: next.SPY.price, qqq_price: next.QQQ.price };
+      // Valor sin dividendos de una cartera con las cantidades del campo indicado (qty o qty_eq).
+      const valueWith = (field) => {
+        let cash = cap, invested = 0;
+        for (const p of positions) {
+          if (p[field] == null) return null;
+          const qty = num(p[field]);
+          cash -= qty * num(p.entry_price);
+          if (p.exit_date != null) cash += qty * num(p.exit_price);
+          else invested += qty * next[p.ticker].price;
+        }
+        return cash + invested;
+      };
+      const row = { user_id: userId, date: marketDate, portfolio_value: valueWith("qty"), portfolio_value_eq: valueWith("qty_eq"), spy_price: next.SPY.price, qqq_price: next.QQQ.price };
       const { data: saved, error: err } = await supabase.from("experiment_snapshots").upsert(row, { onConflict: "user_id,date" }).select().single();
       if (err) setError(err.message);
       else setSnapshots((prev) => [...prev.filter((s) => s.date !== saved.date), saved].sort((a, b) => (a.date < b.date ? -1 : 1)));
@@ -250,6 +272,8 @@ export default function Experiment({ session }) {
 
   const advSpy = calc.portRet != null && calc.spyRet != null ? calc.portRet - calc.spyRet : null;
   const advQqq = calc.portRet != null && calc.qqqRet != null ? calc.portRet - calc.qqqRet : null;
+  // Lo que aportan (o restan) mis pesos frente a repartir a partes iguales.
+  const advEq = calc.portRet != null && calc.eqRet != null ? calc.portRet - calc.eqRet : null;
   const th = { textAlign: "right" };
   const td = { textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" };
   // Los textos largos dentro de la tabla se quedan pegados a la izquierda y se ajustan al ancho de
@@ -295,9 +319,9 @@ export default function Experiment({ session }) {
           <div className="card-sub">ventaja de la cartera: <span style={{ color: signColor(advQqq) }}>{fmtPts(advQqq, 2)}</span></div>
         </div>
         <div className="card">
-          <div className="card-label">Aciertos</div>
-          <div className="card-value big">{calc.beatSpy}/{calc.nComparable}</div>
-          <div className="card-sub">baten al S&P 500 · {calc.beatQqq}/{calc.nComparable} al QQQ</div>
+          <div className="card-label">A partes iguales</div>
+          <div className="card-value big" style={{ color: signColor(calc.eqRet) }}>{fmtPct(calc.eqRet, 2)}</div>
+          <div className="card-sub">mis pesos aportan: <span style={{ color: signColor(advEq) }}>{fmtPts(advEq, 2)}</span></div>
         </div>
       </div>
 
@@ -320,6 +344,7 @@ export default function Experiment({ session }) {
                 formatter={(v, name) => [`${v.toFixed(2)} (${fmtPct(v - 100, 2)})`, name]}
               />
               <Legend wrapperStyle={{ fontSize: 12, color: "var(--muted)" }} />
+              <Line type="linear" name="A partes iguales" dataKey="eq" stroke={COLORS.eq} strokeWidth={1.5} strokeDasharray="5 4" dot={false} isAnimationActive={false} connectNulls />
               <Line type="linear" name="Cartera" dataKey="cartera" stroke={COLORS.cartera} strokeWidth={2.5} dot={chartData.length < 15} activeDot={{ r: 5 }} isAnimationActive={false} />
               <Line type="linear" name="S&P 500" dataKey="spy" stroke={COLORS.spy} strokeWidth={2} dot={chartData.length < 15} isAnimationActive={false} />
               <Line type="linear" name="QQQ" dataKey="qqq" stroke={COLORS.qqq} strokeWidth={2} dot={chartData.length < 15} isAnimationActive={false} />
@@ -330,7 +355,10 @@ export default function Experiment({ session }) {
 
       <div className="panel">
         <div className="panel-head" style={{ flexWrap: "wrap", gap: 8 }}>
-          <div className="panel-title">Posiciones abiertas ({calc.open.length})</div>
+          <div>
+            <div className="panel-title">Posiciones abiertas ({calc.open.length})</div>
+            <div className="card-sub">Baten al S&P 500: {calc.beatSpy} de {calc.nComparable} · al QQQ: {calc.beatQqq} de {calc.nComparable}</div>
+          </div>
           <div className="tabs">
             {[["peso", "Peso"], ["rent", "Rentabilidad"], ["vs", "Vs S&P 500"]].map(([k, label]) => (
               <button key={k} className={`tab ${sortBy === k ? "active" : ""}`} onClick={() => setSortBy(k)}>{label}</button>
