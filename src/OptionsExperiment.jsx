@@ -104,17 +104,21 @@ export default function OptionsExperiment({ session }) {
         supabase.from("experiment_prices").select("*"),
         supabase.from("experiment_snapshots").select("*").order("date", { ascending: true }),
         supabase.from("experiment_dividends").select("*"),
+        // Liquidez invertida en un ETF monetario (XFFE desde el 19-oct-2026).
+        supabase.from("optexp_cash").select("*").order("trade_date", { ascending: true }),
+        supabase.from("optexp_prices").select("*"),
       ]);
       if (cancelled) return;
       const firstErr = res.find((r) => r.error);
       if (firstErr) setError(firstErr.error.message);
-      const [config, trades, legs, snapshots, universe, log, stockConfig, stockPositions, stockPrices, stockSnapshots, dividends] = res.map((r) => r.data);
+      const [config, trades, legs, snapshots, universe, log, stockConfig, stockPositions, stockPrices, stockSnapshots, dividends, cashTrades, optPrices] = res.map((r) => r.data);
       const prices = {};
       (stockPrices || []).forEach((r) => { prices[r.ticker] = num(r.price); });
       setData({
         config: config || null, trades: trades || [], legs: legs || [], snapshots: snapshots || [],
         universe: universe || [], log: log || [], stockConfig: stockConfig || null,
         stockPositions: stockPositions || [], prices, stockSnapshots: stockSnapshots || [], dividends: dividends || [],
+        cashTrades: cashTrades || [], optPrices: Object.fromEntries((optPrices || []).map((r) => [r.ticker, { price: num(r.price), date: r.price_date }])),
       });
       setLoading(false);
     })();
@@ -123,7 +127,7 @@ export default function OptionsExperiment({ session }) {
 
   const calc = useMemo(() => {
     if (!data?.config) return null;
-    const { config, trades, legs, dividends, prices, stockConfig, stockPositions } = data;
+    const { config, trades, legs, dividends, prices, stockConfig, stockPositions, cashTrades, optPrices } = data;
     const startCapital = num(config.start_capital);
 
     const rows = trades.map((t) => {
@@ -156,7 +160,17 @@ export default function OptionsExperiment({ session }) {
     const closedRows = rows.filter((r) => r.closed).sort((a, b) => (a.exit_date < b.exit_date ? 1 : -1));
     const realized = closedRows.reduce((s, r) => s + r.pnl, 0);
     const unrealized = open.reduce((s, r) => s + r.pnl, 0);
-    const total = startCapital + realized + unrealized;
+    // ETF monetario: participaciones netas, valor actual y ganancia (valor − compras + ventas).
+    // Las compras pendientes (sin precio todavía) no cuentan.
+    const filled = cashTrades.filter((c) => c.qty != null && c.price != null);
+    const cashQty = filled.reduce((s, c) => s + (c.kind === "compra" ? 1 : -1) * num(c.qty), 0);
+    const cashCost = filled.reduce((s, c) => s + (c.kind === "compra" ? 1 : -1) * num(c.qty) * num(c.price), 0);
+    const cashTicker = config.cash_etf || null;
+    const cashPrice = cashTicker ? optPrices[cashTicker]?.price ?? null : null;
+    const cashValue = cashPrice != null ? cashQty * cashPrice : null;
+    const cashPnl = cashValue != null ? cashValue - cashCost : 0;
+    const cashPending = cashTrades.some((c) => c.price == null);
+    const total = startCapital + realized + unrealized + cashPnl;
     const openRisk = open.reduce((s, r) => s + r.maxRisk, 0);
 
     // Estadística por estrategia y del conjunto, solo con operaciones cerradas.
@@ -198,6 +212,7 @@ export default function OptionsExperiment({ session }) {
 
     return {
       startCapital, total, realized, unrealized, open, closedRows, openRisk, stats, statsTotal,
+      cashTicker, cashQty, cashValue, cashPnl, cashPending, cashPriceDate: cashTicker ? optPrices[cashTicker]?.date : null,
       openRiskPct: startCapital ? (openRisk / total) * 100 : null,
       portRet: pct(total, startCapital), spyRet, qqqRet, stockRet,
       feesTotal: rows.reduce((s, r) => s + r.fees, 0),
@@ -260,7 +275,7 @@ export default function OptionsExperiment({ session }) {
         <div className="eyebrow">EXPERIMENTO · CARTERA TEÓRICA DE OPCIONES</div>
         <div className="h1">¿Rinde más vender prima que tener las acciones?</div>
         <div className="card-sub" style={{ marginTop: 4 }}>
-          Desde el {fmtDate(config.start_date)} con {fmtMoney(calc.startCapital, 0)} teóricos · spreads de riesgo definido · comisión de {fmtMoney(num(config.commission_per_contract))} por contrato · la liquidez no cobra intereses
+          Desde el {fmtDate(config.start_date)} con {fmtMoney(calc.startCapital, 0)} teóricos · spreads de riesgo definido · comisión de {fmtMoney(num(config.commission_per_contract))} por contrato · {calc.cashTicker ? `liquidez en ${calc.cashTicker} (tipo a un día del dólar) desde el 19-oct-2026; antes no cobraba intereses` : "la liquidez no cobra intereses"}
         </div>
       </div>
 
@@ -268,7 +283,7 @@ export default function OptionsExperiment({ session }) {
         <div className="card">
           <div className="card-label">Cartera de opciones</div>
           <div className="card-value big" style={{ color: signColor(calc.portRet) }}>{fmtPct(calc.portRet, 2)}</div>
-          <div className="card-sub">{fmtMoney(calc.total)} · cerrado {fmtSigned(calc.realized)} · abierto {fmtSigned(calc.unrealized)}</div>
+          <div className="card-sub">{fmtMoney(calc.total)} · cerrado {fmtSigned(calc.realized)} · abierto {fmtSigned(calc.unrealized)}{calc.cashTicker ? ` · ${calc.cashTicker} ${fmtSigned(calc.cashPnl)}` : ""}</div>
         </div>
         <div className="card">
           <div className="card-label">Cartera de acciones</div>
@@ -284,6 +299,11 @@ export default function OptionsExperiment({ session }) {
           <div className="card-label">Riesgo abierto</div>
           <div className="card-value big">{fmtPlain(calc.openRiskPct, 1)}</div>
           <div className="card-sub">{fmtMoney(calc.openRisk, 0)} en {calc.open.length} operaciones · tope 40%</div>
+          {calc.cashTicker && (
+            <div className="card-sub">
+              {calc.cashPending && !calc.cashQty ? `Compra de ${calc.cashTicker} pendiente de la apertura` : `${calc.cashTicker}: ${calc.cashQty} participaciones · ${fmtMoney(calc.cashValue, 0)}`}
+            </div>
+          )}
         </div>
       </div>
 
