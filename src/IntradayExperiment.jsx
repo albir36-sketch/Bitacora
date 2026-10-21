@@ -27,9 +27,10 @@ const fmtDate = (iso) => {
 };
 const signColor = (n) => (n == null || Number.isNaN(n) || n === 0 ? "var(--muted)" : n > 0 ? "var(--gain)" : "var(--loss)");
 
-const COLORS = { senal: "#34D399", control: "#E8A33D", ema35: "#60A5FA" };
+const COLORS = { senal: "#34D399", senal_d20: "#F472B6", control: "#E8A33D", ema35: "#60A5FA" };
 const BOOKS = [
   ["senal", "Señal media 30"],
+  ["senal_d20", "Señal · delta 0,20"],
   ["control", "Control 10:30"],
   ["ema35", "Toque EMA 35"],
 ];
@@ -38,6 +39,7 @@ const RULES = [
   ["Libro «señal»", "Velas de 5 min del SPX. Señal alcista: dos cierres seguidos por encima de la media de 30, el segundo más alto que el primero y el anterior por debajo. Solo cuenta si la vela cierra entre las 10:00 y las 12:00 de Nueva York. La primera señal del día abre un put credit spread. Sin calls."],
   ["Libro «control»", "El mismo put spread cada día con la vela que cierra a las 10:30, sin señal. Sirve para saber si la señal aporta o si lo que gana es vender prima."],
   ["Libro «EMA 35»", "Añadido el 21-oct-2026 (idea del canal Master Traders). EMA de 35 velas de 5 min. Señal: la vela toca la media (mínimo ≤ EMA) y cierra por encima, la anterior también cerró por encima y la media está más alta que hace 6 velas. Misma ventana de 10:00 a 12:00 y mismo spread. En la prueba sobre histórico dio +28 $ por operación, pero con EMA de 15, 21 o 50 casi desaparece: por eso se comprueba en directo."],
+  ["Libro «señal delta 0,20»", "Añadido el 22-oct-2026. Misma señal y misma entrada que el libro «señal», pero con la pata vendida en delta ≤ 0,20 en lugar de 0,12 (más prima, más riesgo de que se toque). En la prueba sobre histórico dio +39 $ por operación frente a +21 $ con 0,12, aunque el modelo de precios puede exagerar esa mejora."],
   ["Spread", "Vencimiento del mismo día (SPXW). Pata vendida: el primer strike con delta ≤ 0,12. Pata comprada 10 puntos por debajo."],
   ["Precio", "Cierre de 5 min de cada pata en la vela de entrada, menos 0,10 de deslizamiento. Comisiones 3 $ por spread."],
   ["Salida", "Sin stop ni objetivo: se deja vencer. Liquidación con el cierre del SPX."],
@@ -100,13 +102,13 @@ export default function IntradayExperiment({ session }) {
     }
     // curva: valor de cada libro tras cada día registrado
     const dates = [...new Set(days.map((d) => d.date).concat(trades.map((t) => t.trade_date)))].sort();
-    let acc = { senal: 0, control: 0, ema35: 0 };
-    const chart = [{ date: fmtDate(config.start_date), senal: capital, control: capital, ema35: capital }];
+    const acc = Object.fromEntries(BOOKS.map(([b]) => [b, 0]));
+    const chart = [{ date: fmtDate(config.start_date), ...Object.fromEntries(BOOKS.map(([b]) => [b, capital])) }];
     for (const dt of dates) {
       for (const [b] of BOOKS) {
         acc[b] += trades.filter((t) => t.book === b && t.trade_date === dt).reduce((s, t) => s + (num(t.pnl) || 0), 0);
       }
-      chart.push({ date: fmtDate(dt), senal: capital + acc.senal, control: capital + acc.control, ema35: capital + acc.ema35 });
+      chart.push({ date: fmtDate(dt), ...Object.fromEntries(BOOKS.map(([b]) => [b, capital + acc[b]])) });
     }
     // filtro candidato: barrido del mínimo de ayer
     const sweptByDate = Object.fromEntries(days.map((d) => [d.date, d.swept_prev_low_at_entry]));
@@ -144,9 +146,9 @@ export default function IntradayExperiment({ session }) {
         <div className="eyebrow">EXPERIMENTO · INTRADÍA 0DTE EN EL SPX</div>
         <div className="h1">¿Aporta la señal de la media 30 al vender puts del mismo día?</div>
         <div className="card-sub" style={{ marginTop: 4 }}>
-          Cartera teórica de {fmtMoney(calc.capital, 0)} desde el {fmtDate(config.start_date)}. Tres libros de put credit spreads
+          Cartera teórica de {fmtMoney(calc.capital, 0)} desde el {fmtDate(config.start_date)}. Cuatro libros de put credit spreads
           0DTE con precios reales de IBKR: uno abre cuando salta la señal de la media de 30 en 5 minutos, otro cuando el
-          precio toca la EMA 35 con la media subiendo, y el tercero vende todos los días a las 10:30 como control. Se deja vencer, sin stop. Cada día laborable, a las 16:27 de
+          precio toca la EMA 35 con la media subiendo, otro igual que el de la señal pero con la pata vendida en delta 0,20, y el último vende todos los días a las 10:30 como control. Se deja vencer, sin stop. Cada día laborable, a las 16:27 de
           Nueva York, una tarea programada anota la sesión.
         </div>
       </div>
@@ -197,6 +199,7 @@ export default function IntradayExperiment({ session }) {
               <Line type="linear" name="Señal media 30" dataKey="senal" stroke={COLORS.senal} strokeWidth={2.5} dot={calc.chart.length < 25} isAnimationActive={false} />
               <Line type="linear" name="Control 10:30" dataKey="control" stroke={COLORS.control} strokeWidth={2} dot={calc.chart.length < 25} isAnimationActive={false} />
               <Line type="linear" name="Toque EMA 35" dataKey="ema35" stroke={COLORS.ema35} strokeWidth={2} dot={calc.chart.length < 25} isAnimationActive={false} />
+              <Line type="linear" name="Señal · delta 0,20" dataKey="senal_d20" stroke={COLORS.senal_d20} strokeWidth={2} dot={calc.chart.length < 25} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         )}
@@ -216,24 +219,15 @@ export default function IntradayExperiment({ session }) {
                   <th style={th}>VIX1D</th>
                   <th>Señal</th>
                   <th>EMA 35</th>
-                  <th>Señal: spread</th>
-                  <th style={th}>Crédito</th>
-                  <th style={th}>Resultado</th>
-                  <th>EMA 35: spread</th>
-                  <th style={th}>Crédito</th>
-                  <th style={th}>Resultado</th>
-                  <th>Control: spread</th>
-                  <th style={th}>Crédito</th>
-                  <th style={th}>Resultado</th>
+                  {BOOKS.map(([b, label]) => (
+                    <th key={b} colSpan={3} style={{ color: COLORS[b] }}>{label}: spread · crédito · resultado</th>
+                  ))}
                   <th>Mín. de ayer barrido</th>
                   <th>Notas</th>
                 </tr>
               </thead>
               <tbody>
                 {days.map((d) => {
-                  const s = tradesByDate[d.date]?.senal;
-                  const c = tradesByDate[d.date]?.control;
-                  const e = tradesByDate[d.date]?.ema35;
                   const spread = (t) => (t ? `${fmtNum(num(t.short_strike), 0)}/${fmtNum(num(t.long_strike), 0)} · ${t.entry_time}` : "—");
                   return (
                     <tr key={d.date}>
@@ -242,15 +236,14 @@ export default function IntradayExperiment({ session }) {
                       <td style={th}>{fmtNum(num(d.vix1d_prev), 2)}</td>
                       <td>{d.signal_dir ? d.signal_time : "No"}</td>
                       <td>{d.ema35_time || "No"}</td>
-                      <td className="mono">{spread(s)}</td>
-                      <td style={th}>{s ? fmtNum(num(s.credit), 2) : "—"}</td>
-                      <td style={{ ...th, color: signColor(num(s?.pnl)) }}>{s ? fmtSigned(num(s.pnl), 0) : "—"}</td>
-                      <td className="mono">{spread(e)}</td>
-                      <td style={th}>{e ? fmtNum(num(e.credit), 2) : "—"}</td>
-                      <td style={{ ...th, color: signColor(num(e?.pnl)) }}>{e ? fmtSigned(num(e.pnl), 0) : "—"}</td>
-                      <td className="mono">{spread(c)}</td>
-                      <td style={th}>{c ? fmtNum(num(c.credit), 2) : "—"}</td>
-                      <td style={{ ...th, color: signColor(num(c?.pnl)) }}>{c ? fmtSigned(num(c.pnl), 0) : "—"}</td>
+                      {BOOKS.map(([b]) => {
+                        const t = tradesByDate[d.date]?.[b];
+                        return [
+                          <td key={`${b}-s`} className="mono">{spread(t)}</td>,
+                          <td key={`${b}-c`} style={th}>{t ? fmtNum(num(t.credit), 2) : "—"}</td>,
+                          <td key={`${b}-p`} style={{ ...th, color: signColor(num(t?.pnl)) }}>{t ? fmtSigned(num(t.pnl), 0) : "—"}</td>,
+                        ];
+                      })}
                       <td>{d.swept_prev_low_at_entry == null ? "—" : d.swept_prev_low_at_entry ? "Sí" : "No"}</td>
                       <td style={{ color: "var(--muted)", fontSize: 13 }}>{[d.macro, d.notes].filter(Boolean).join(" · ") || ""}</td>
                     </tr>
