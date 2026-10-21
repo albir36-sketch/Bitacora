@@ -5,9 +5,10 @@ import {
 } from "recharts";
 import { supabase } from "./supabaseClient";
 
-// Experimento intradía 0DTE en el SPX: cartera TEÓRICA, dos libros de put credit spreads del mismo día.
+// Experimento intradía 0DTE en el SPX: cartera TEÓRICA, tres libros de put credit spreads del mismo día.
 //   'senal'   → señal de media 30 en velas de 5 min (primera señal alcista entre las 10:00 y las 12:00 de NY).
 //   'control' → put spread a ciegas con la vela que cierra a las 10:30.
+//   'ema35'   → toque de la EMA 35 de 5 min con la media subiendo (10:00-12:00), añadido el 21-oct-2026.
 // La tarea programada diaria (16:27 NY) rellena idxexp_days, idxexp_trades, idxexp_bars e idxexp_legprices.
 // Esta vista solo lee y calcula. credit y settle_value son por acción; pnl ya está en dólares por spread.
 
@@ -26,15 +27,17 @@ const fmtDate = (iso) => {
 };
 const signColor = (n) => (n == null || Number.isNaN(n) || n === 0 ? "var(--muted)" : n > 0 ? "var(--gain)" : "var(--loss)");
 
-const COLORS = { senal: "#34D399", control: "#E8A33D" };
+const COLORS = { senal: "#34D399", control: "#E8A33D", ema35: "#60A5FA" };
 const BOOKS = [
   ["senal", "Señal media 30"],
   ["control", "Control 10:30"],
+  ["ema35", "Toque EMA 35"],
 ];
 
 const RULES = [
   ["Libro «señal»", "Velas de 5 min del SPX. Señal alcista: dos cierres seguidos por encima de la media de 30, el segundo más alto que el primero y el anterior por debajo. Solo cuenta si la vela cierra entre las 10:00 y las 12:00 de Nueva York. La primera señal del día abre un put credit spread. Sin calls."],
   ["Libro «control»", "El mismo put spread cada día con la vela que cierra a las 10:30, sin señal. Sirve para saber si la señal aporta o si lo que gana es vender prima."],
+  ["Libro «EMA 35»", "Añadido el 21-oct-2026 (idea del canal Master Traders). EMA de 35 velas de 5 min. Señal: la vela toca la media (mínimo ≤ EMA) y cierra por encima, la anterior también cerró por encima y la media está más alta que hace 6 velas. Misma ventana de 10:00 a 12:00 y mismo spread. En la prueba sobre histórico dio +28 $ por operación, pero con EMA de 15, 21 o 50 casi desaparece: por eso se comprueba en directo."],
   ["Spread", "Vencimiento del mismo día (SPXW). Pata vendida: el primer strike con delta ≤ 0,12. Pata comprada 10 puntos por debajo."],
   ["Precio", "Cierre de 5 min de cada pata en la vela de entrada, menos 0,10 de deslizamiento. Comisiones 3 $ por spread."],
   ["Salida", "Sin stop ni objetivo: se deja vencer. Liquidación con el cierre del SPX."],
@@ -97,13 +100,13 @@ export default function IntradayExperiment({ session }) {
     }
     // curva: valor de cada libro tras cada día registrado
     const dates = [...new Set(days.map((d) => d.date).concat(trades.map((t) => t.trade_date)))].sort();
-    let acc = { senal: 0, control: 0 };
-    const chart = [{ date: fmtDate(config.start_date), senal: capital, control: capital }];
+    let acc = { senal: 0, control: 0, ema35: 0 };
+    const chart = [{ date: fmtDate(config.start_date), senal: capital, control: capital, ema35: capital }];
     for (const dt of dates) {
       for (const [b] of BOOKS) {
         acc[b] += trades.filter((t) => t.book === b && t.trade_date === dt).reduce((s, t) => s + (num(t.pnl) || 0), 0);
       }
-      chart.push({ date: fmtDate(dt), senal: capital + acc.senal, control: capital + acc.control });
+      chart.push({ date: fmtDate(dt), senal: capital + acc.senal, control: capital + acc.control, ema35: capital + acc.ema35 });
     }
     // filtro candidato: barrido del mínimo de ayer
     const sweptByDate = Object.fromEntries(days.map((d) => [d.date, d.swept_prev_low_at_entry]));
@@ -141,9 +144,9 @@ export default function IntradayExperiment({ session }) {
         <div className="eyebrow">EXPERIMENTO · INTRADÍA 0DTE EN EL SPX</div>
         <div className="h1">¿Aporta la señal de la media 30 al vender puts del mismo día?</div>
         <div className="card-sub" style={{ marginTop: 4 }}>
-          Cartera teórica de {fmtMoney(calc.capital, 0)} desde el {fmtDate(config.start_date)}. Dos libros de put credit spreads
-          0DTE con precios reales de IBKR: uno abre solo cuando salta la señal de la media de 30 en 5 minutos, y el otro
-          vende todos los días a las 10:30 como control. Se deja vencer, sin stop. Cada día laborable, a las 16:27 de
+          Cartera teórica de {fmtMoney(calc.capital, 0)} desde el {fmtDate(config.start_date)}. Tres libros de put credit spreads
+          0DTE con precios reales de IBKR: uno abre cuando salta la señal de la media de 30 en 5 minutos, otro cuando el
+          precio toca la EMA 35 con la media subiendo, y el tercero vende todos los días a las 10:30 como control. Se deja vencer, sin stop. Cada día laborable, a las 16:27 de
           Nueva York, una tarea programada anota la sesión.
         </div>
       </div>
@@ -193,6 +196,7 @@ export default function IntradayExperiment({ session }) {
               <Legend wrapperStyle={{ fontSize: 12, color: "var(--muted)" }} />
               <Line type="linear" name="Señal media 30" dataKey="senal" stroke={COLORS.senal} strokeWidth={2.5} dot={calc.chart.length < 25} isAnimationActive={false} />
               <Line type="linear" name="Control 10:30" dataKey="control" stroke={COLORS.control} strokeWidth={2} dot={calc.chart.length < 25} isAnimationActive={false} />
+              <Line type="linear" name="Toque EMA 35" dataKey="ema35" stroke={COLORS.ema35} strokeWidth={2} dot={calc.chart.length < 25} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         )}
@@ -211,7 +215,11 @@ export default function IntradayExperiment({ session }) {
                   <th style={th}>Cierre SPX</th>
                   <th style={th}>VIX1D</th>
                   <th>Señal</th>
+                  <th>EMA 35</th>
                   <th>Señal: spread</th>
+                  <th style={th}>Crédito</th>
+                  <th style={th}>Resultado</th>
+                  <th>EMA 35: spread</th>
                   <th style={th}>Crédito</th>
                   <th style={th}>Resultado</th>
                   <th>Control: spread</th>
@@ -225,6 +233,7 @@ export default function IntradayExperiment({ session }) {
                 {days.map((d) => {
                   const s = tradesByDate[d.date]?.senal;
                   const c = tradesByDate[d.date]?.control;
+                  const e = tradesByDate[d.date]?.ema35;
                   const spread = (t) => (t ? `${fmtNum(num(t.short_strike), 0)}/${fmtNum(num(t.long_strike), 0)} · ${t.entry_time}` : "—");
                   return (
                     <tr key={d.date}>
@@ -232,9 +241,13 @@ export default function IntradayExperiment({ session }) {
                       <td style={th}>{fmtNum(num(d.spx_close), 2)}</td>
                       <td style={th}>{fmtNum(num(d.vix1d_prev), 2)}</td>
                       <td>{d.signal_dir ? d.signal_time : "No"}</td>
+                      <td>{d.ema35_time || "No"}</td>
                       <td className="mono">{spread(s)}</td>
                       <td style={th}>{s ? fmtNum(num(s.credit), 2) : "—"}</td>
                       <td style={{ ...th, color: signColor(num(s?.pnl)) }}>{s ? fmtSigned(num(s.pnl), 0) : "—"}</td>
+                      <td className="mono">{spread(e)}</td>
+                      <td style={th}>{e ? fmtNum(num(e.credit), 2) : "—"}</td>
+                      <td style={{ ...th, color: signColor(num(e?.pnl)) }}>{e ? fmtSigned(num(e.pnl), 0) : "—"}</td>
                       <td className="mono">{spread(c)}</td>
                       <td style={th}>{c ? fmtNum(num(c.credit), 2) : "—"}</td>
                       <td style={{ ...th, color: signColor(num(c?.pnl)) }}>{c ? fmtSigned(num(c.pnl), 0) : "—"}</td>
