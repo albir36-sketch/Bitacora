@@ -8,7 +8,7 @@ import { supabase } from "./supabaseClient";
 // Experimento EN VIVO del doble calendario semanal en SPX (cartera TEÓRICA, desde el 27-oct-2026).
 // Entrada el lunes a las 15:44 NY: put y call SPXW a delta 0,20 que vencen el viernes, largas del siguiente día hábil.
 // Revisiones de martes a viernes a las 10:31, 13:31 y 15:44 NY (tareas programadas) → dcexp_marks y dcexp_exits.
-// Cuatro libros con la misma operación: regla de Rafa a 0,3 % y a 0,2 % del punto muerto, +25 % del débito y viernes.
+// Cuatro libros con la misma operación: regla de Rafa a 0,3 % y a 0,2 % del breakeven, +25 % del débito y viernes.
 // debit, value_* son por acción (×100 = $); pnl ya está en dólares por doble calendario (con 12 $ de comisiones).
 
 const num = (v) => (v == null ? null : Number(v));
@@ -50,9 +50,9 @@ const REASONS = {
 const RULES = [
   ["Entrada", "Cada lunes a las 15:44 de Nueva York (martes si el lunes es festivo). Se venden put y call SPXW con delta ≈ 0,20 que vencen el viernes y se compran las mismas con vencimiento el siguiente día hábil (normalmente el lunes)."],
   ["Precio", "Débito realista: compra de las largas a medio + ¼ de la horquilla y venta de las cortas a medio − ¼. Comisiones de 12 $ por doble calendario (1,5 $ por contrato y lado)."],
-  ["Revisiones", "De martes a viernes a las 10:31, 13:31 y 15:44 de Nueva York (16:31, 19:31 y 21:44 en España, salvo cambio de hora). En cada revisión se guarda el valor, el P&L si se cerrara en ese momento, los puntos muertos y los niveles de salida."],
-  ["Regla de Rafa (0,3 %)", "Se calcula dónde la operación dejaría de ganar ahora mismo (puntos muertos, como la tabla de OptionStrat) y la salida se pone 0,3 % del SPX antes, hacia el centro: la «tercera fila positiva» de la tabla con rango ±1 %. Si el SPX llega a ese nivel, por abajo o por arriba, y la operación da beneficio, se cierra. Si llega pero va en pérdida, se aguanta hasta el viernes."],
-  ["Regla de Rafa (0,2 %)", "Igual, con la salida 0,2 % antes del punto muerto. Se lleva para comparar."],
+  ["Revisiones", "De martes a viernes a las 10:31, 13:31 y 15:44 de Nueva York (16:31, 19:31 y 21:44 en España, salvo cambio de hora). En cada revisión se guarda el valor, el P&L si se cerrara en ese momento, los breakevens y los niveles de salida."],
+  ["Regla de Rafa (0,3 %)", "Se calcula dónde la operación dejaría de ganar ahora mismo (breakevens, como la tabla de OptionStrat) y la salida se pone 0,3 % del SPX antes, hacia el centro: la «tercera fila positiva» de la tabla con rango ±1 %. Si el SPX llega a ese nivel, por abajo o por arriba, y la operación da beneficio, se cierra. Si llega pero va en pérdida, se aguanta hasta el viernes."],
+  ["Regla de Rafa (0,2 %)", "Igual, con la salida 0,2 % antes del breakeven. Se lleva para comparar."],
   ["Objetivo +25 %", "Se cierra cuando el P&L llega al 25 % del débito pagado."],
   ["Hasta el viernes", "Se cierra en la revisión de las 15:44 del viernes. Todos los libros que sigan abiertos ese día se cierran también a esa hora."],
   ["Modelo", "Black-Scholes con la volatilidad de cada pata fija y anclado al valor de mercado del momento. Los niveles pueden diferir ~0,1 % de los de OptionStrat porque aquí se usan los precios reales de IBKR."],
@@ -151,7 +151,7 @@ export default function DoubleCalendarExperiment({ session }) {
           Cartera teórica desde el {fmtDate(config.start_date)}, con precios reales de IBKR y sin órdenes. Cada lunes se abre un
           doble calendario en SPX (strikes a delta 0,20, cortas del viernes y largas del lunes siguiente) y se revisa tres veces
           al día hasta el viernes. Cuatro libros con la misma operación comparan cuándo cerrar: la regla de Rafa a 0,3 % y a 0,2 %
-          del punto muerto, un objetivo del +25 % del débito y aguantar hasta el viernes. Resultados en $ por doble calendario,
+          del breakeven, un objetivo del +25 % del débito y aguantar hasta el viernes. Resultados en $ por doble calendario,
           con comisiones.
         </div>
       </div>
@@ -206,7 +206,7 @@ export default function DoubleCalendarExperiment({ session }) {
                       <div className="card-sub">Valor a medio {fmtMoney(num(last.value_mid) * 100, 0)}</div>
                     </div>
                     <div className="card">
-                      <div className="card-label">Puntos muertos ahora</div>
+                      <div className="card-label">Breakevens ahora</div>
                       <div className="card-value">{fmtNum(num(last.be_low), 0)} · {fmtNum(num(last.be_high), 0)}</div>
                       <div className="card-sub">{fmtPctOf(num(last.be_low), spx)} · {fmtPctOf(num(last.be_high), spx)}</div>
                     </div>
