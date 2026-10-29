@@ -33,11 +33,12 @@ const fmtNY = (ts) => {
 };
 const signColor = (n) => (n == null || Number.isNaN(n) || n === 0 ? "var(--muted)" : n > 0 ? "var(--gain)" : "var(--loss)");
 
-const COLORS = { rafa_03: "#34D399", rafa_02: "#F472B6", pct_25: "#60A5FA", viernes: "#E8A33D" };
+const COLORS = { rafa_03: "#34D399", rafa_02: "#F472B6", pct_25: "#60A5FA", toque_strike: "#A78BFA", viernes: "#E8A33D" };
 const BOOKS = [
   ["rafa_03", "Regla de Rafa · 0,3 %"],
   ["rafa_02", "Regla de Rafa · 0,2 %"],
   ["pct_25", "Objetivo +25 %"],
+  ["toque_strike", "Toque de strike"],
   ["viernes", "Hasta el viernes"],
 ];
 const UNDERLYINGS = ["SPX", "NDX", "QQQ", "DJX"];
@@ -47,6 +48,7 @@ const REASONS = {
   nivel_inferior: "nivel inferior",
   nivel_superior: "nivel superior",
   objetivo_25: "objetivo +25 %",
+  toque_strike: "toque de strike",
   viernes: "viernes",
 };
 
@@ -59,6 +61,7 @@ const RULES = [
   ["Regla de Rafa (0,3 %)", "Se calcula dónde la operación dejaría de ganar ahora mismo (breakevens, como la tabla de OptionStrat) y la salida se pone 0,3 % del precio antes, hacia el centro: la «tercera fila positiva» de la tabla con rango ±1 %. Si el precio llega a ese nivel, por abajo o por arriba, y la operación da beneficio, se cierra. Si llega pero va en pérdida, se aguanta hasta el viernes."],
   ["Regla de Rafa (0,2 %)", "Igual, con la salida 0,2 % antes del breakeven. Se lleva para comparar."],
   ["Objetivo +25 %", "Se cierra cuando el P&L llega al 25 % del débito pagado."],
+  ["Toque de strike", "Añadido el 29-oct-2026 (idea de Rafa). Desde el día siguiente a la entrada, en cada revisión se mira el máximo y el mínimo del índice desde la revisión anterior. Si el precio ha tocado el strike de la put o el de la call, se cierra en la primera revisión en que la operación vaya en beneficio (puede ser esa misma). Si no llega a ir en beneficio, se cierra el viernes."],
   ["Hasta el viernes", "Se cierra en la revisión de las 15:44 del viernes. Todos los libros que sigan abiertos ese día se cierran también a esa hora."],
   ["Modelo", "Black-Scholes con la volatilidad de cada pata fija y anclado al valor de mercado del momento. Los niveles pueden diferir ~0,1 % de los de OptionStrat porque aquí se usan los precios reales de IBKR."],
 ];
@@ -182,8 +185,8 @@ export default function DoubleCalendarExperiment({ session }) {
         <div className="card-sub" style={{ marginTop: 4 }}>
           Cartera teórica desde el {fmtDate(config.start_date)}, con precios reales de IBKR y sin órdenes. Cada lunes se abre un
           doble calendario en cada índice (SPX, NDX, QQQ y DJX; strikes a delta 0,20, cortas del viernes y largas del lunes
-          siguiente) y se revisa tres veces al día hasta el viernes. Cuatro libros con la misma operación comparan cuándo cerrar: la regla de Rafa a 0,3 % y a 0,2 %
-          del breakeven, un objetivo del +25 % del débito y aguantar hasta el viernes. Resultados en $ por doble calendario,
+          siguiente) y se revisa tres veces al día hasta el viernes. Cinco libros con la misma operación comparan cuándo cerrar: la regla de Rafa a 0,3 % y a 0,2 %
+          del breakeven, un objetivo del +25 % del débito, salir al tocar un strike vendido y aguantar hasta el viernes. Resultados en $ por doble calendario,
           con comisiones.
         </div>
       </div>
@@ -298,6 +301,7 @@ export default function DoubleCalendarExperiment({ session }) {
                     </div>
                     <div className="card">
                       <div className="card-label">Libros</div>
+                      <div className="card-sub">Strike tocado: {ms.some((m) => m.strike_touched) ? "sí" : "no"}</div>
                       {BOOKS.map(([b, label]) => (
                         <div className="card-sub" key={b} style={{ color: COLORS[b] }}>
                           {label}: {ex[b] ? `cerrado ${fmtSigned(num(ex[b].pnl), 0)}` : "abierto"}
