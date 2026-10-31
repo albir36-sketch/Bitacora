@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Legend,
 } from "recharts";
-import { RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
+import { RefreshCw, ChevronDown, ChevronRight, Download } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 // Experimento "¿podemos batir a los índices?": una cartera TEÓRICA (no son operaciones reales)
@@ -58,6 +58,74 @@ function divsBetween(dividends, ticker, from, to) {
 // Rentabilidad total: precio más dividendos cobrados, sobre el precio de partida.
 const totalRet = (price, divs, base) => (price == null ? null : pct(price + divs, base));
 
+// ---------- exportar a Excel (.xlsx; también se abre en Google Sheets) ----------
+// Las cifras van como números de verdad (con su formato), para poder ordenar, filtrar y calcular.
+const isoToDate = (iso) => {
+  if (!iso) return null;
+  const [y, m, d] = String(iso).slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+};
+async function exportToExcel(calc, config, sortedOpen) {
+  const { default: writeExcelFile } = await import("write-excel-file/universal");
+  const head = (t, extra = {}) => ({ value: t, fontWeight: "bold", backgroundColor: "#E8A33D", align: "center", ...extra });
+  const txt = (v) => (v == null || v === "" ? null : { value: String(v), type: String });
+  const money = (v) => (v == null || Number.isNaN(v) ? null : { value: v, type: Number, format: "#,##0.00" });
+  const pctCell = (v) => (v == null || Number.isNaN(v) ? null : { value: v / 100, type: Number, format: "+0.0%;-0.0%;0.0%" });
+  const ppCell = (v, d = 1) => (v == null || Number.isNaN(v) ? null : { value: v, type: Number, format: d === 2 ? '+0.00" pp";-0.00" pp";0.00" pp"' : '+0.0" pp";-0.0" pp";0.0" pp"' });
+  const wCell = (v) => (v == null || Number.isNaN(v) ? null : { value: v / 100, type: Number, format: "0.0%" });
+  const dateCell = (iso) => (iso ? { value: isoToDate(iso), type: Date, format: "dd/mm/yyyy" } : null);
+
+  const openRows = [
+    ["Ticker", "Empresa", "Grupo", "Fecha de entrada", "Peso al entrar", "Peso actual", "Rentabilidad", "S&P 500 (mismo periodo)", "QQQ (mismo periodo)", "Vs S&P 500", "Vs QQQ", "Precio de entrada ($)", "Precio actual ($)", "Dividendos por acción ($)", "Aporta a la cartera", "Motor Aprende a Invertir", "Por qué se eligió"].map((h) => head(h)),
+    ...sortedOpen.map((r) => [
+      txt(r.ticker), txt(r.name), txt(r.grupo), dateCell(r.entry_date), wCell(num(r.weight_pct)), wCell(r.weightNow),
+      pctCell(r.ret), pctCell(r.spyRet), pctCell(r.qqqRet), ppCell(r.vsSpy), ppCell(r.vsQqq),
+      money(r.entry), money(r.last), money(r.divs), ppCell(r.contrib, 2), txt(r.motor_bucket), txt(r.thesis),
+    ]),
+    [{ value: "Liquidez", type: String, fontWeight: "bold" }, null, null, null, null, wCell(calc.cashWeight), null, null, null, null, null, null, null, null, null, null, null],
+  ];
+
+  const closedRows = [
+    ["Ticker", "Empresa", "Fecha de entrada", "Precio de entrada ($)", "Fecha de salida", "Precio de salida ($)", "Rentabilidad", "Vs S&P 500", "Vs QQQ", "Desde que salió", "Motivo de salida"].map((h) => head(h)),
+    ...calc.closedRows.map((r) => [
+      txt(r.ticker), txt(r.name), dateCell(r.entry_date), money(r.entry), dateCell(r.exit_date), money(r.ref),
+      pctCell(r.ret), ppCell(r.vsSpy), ppCell(r.vsQqq), pctCell(r.afterExit), txt(r.exit_reason),
+    ]),
+  ];
+
+  const summary = [
+    [head("Resumen"), head("Valor")],
+    [txt("Desde"), dateCell(config.start_date)],
+    [txt("Capital teórico inicial ($)"), money(calc.startCapital)],
+    [txt("Valor actual de la cartera ($)"), money(calc.total)],
+    [txt("Rentabilidad de la cartera"), pctCell(calc.portRet)],
+    [txt("Rentabilidad a partes iguales"), pctCell(calc.eqRet)],
+    [txt("Rentabilidad S&P 500"), pctCell(calc.spyRet)],
+    [txt("Rentabilidad QQQ"), pctCell(calc.qqqRet)],
+    [txt("Liquidez ($)"), money(calc.cash)],
+    [txt("Dividendos cobrados ($)"), money(calc.divTotal)],
+    [txt("Exportado el"), { value: new Date(), type: Date, format: "dd/mm/yyyy hh:mm" }],
+  ];
+
+  const sheets = [
+    { data: openRows, sheet: "Posiciones abiertas", columns: [{ width: 9 }, { width: 28 }, { width: 22 }, { width: 14 }, { width: 11 }, { width: 11 }, { width: 13 }, { width: 14 }, { width: 14 }, { width: 12 }, { width: 12 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 18 }, { width: 70 }], stickyRowsCount: 1, stickyColumnsCount: 1 },
+  ];
+  if (closedRows.length > 1) {
+    sheets.push({ data: closedRows, sheet: "Posiciones cerradas", columns: [{ width: 9 }, { width: 28 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 13 }, { width: 12 }, { width: 12 }, { width: 14 }, { width: 60 }], stickyRowsCount: 1, stickyColumnsCount: 1 });
+  }
+  sheets.push({ data: summary, sheet: "Resumen", columns: [{ width: 32 }, { width: 18 }] });
+
+  const blob = await writeExcelFile(sheets).toBlob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `experimento-batir-indices_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 export default function Experiment({ session }) {
   const userId = session.user.id;
   const [config, setConfig] = useState(null);
@@ -72,6 +140,7 @@ export default function Experiment({ session }) {
   const [progress, setProgress] = useState("");
   const [sortBy, setSortBy] = useState("peso");
   const [expanded, setExpanded] = useState({});
+  const [exporting, setExporting] = useState(false);
 
   async function loadAll() {
     setLoading(true);
@@ -359,10 +428,25 @@ export default function Experiment({ session }) {
             <div className="panel-title">Posiciones abiertas ({calc.open.length})</div>
             <div className="card-sub">Baten al S&P 500: {calc.beatSpy} de {calc.nComparable} · al QQQ: {calc.beatQqq} de {calc.nComparable}</div>
           </div>
-          <div className="tabs">
-            {[["peso", "Peso"], ["rent", "Rentabilidad"], ["vs", "Vs S&P 500"]].map(([k, label]) => (
-              <button key={k} className={`tab ${sortBy === k ? "active" : ""}`} onClick={() => setSortBy(k)}>{label}</button>
-            ))}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: "6px 12px", fontSize: 13 }}
+              disabled={exporting}
+              title="Descargar las posiciones abiertas y cerradas en un archivo Excel (.xlsx), que también se abre en Google Sheets"
+              onClick={async () => {
+                setExporting(true);
+                try { await exportToExcel(calc, config, sortedOpen); } catch (e) { setError("No se pudo crear el Excel: " + (e.message || e)); }
+                setExporting(false);
+              }}
+            >
+              <Download size={14} /> {exporting ? "Preparando…" : "Descargar Excel"}
+            </button>
+            <div className="tabs">
+              {[["peso", "Peso"], ["rent", "Rentabilidad"], ["vs", "Vs S&P 500"]].map(([k, label]) => (
+                <button key={k} className={`tab ${sortBy === k ? "active" : ""}`} onClick={() => setSortBy(k)}>{label}</button>
+              ))}
+            </div>
           </div>
         </div>
         <div className="table-wrap">
