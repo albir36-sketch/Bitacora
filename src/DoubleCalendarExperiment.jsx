@@ -42,6 +42,8 @@ const BOOKS = [
   ["viernes", "Hasta el viernes"],
 ];
 const UNDERLYINGS = ["SPX", "NDX", "QQQ", "DJX"];
+const tandaOf = (t) => (t.origin === "regla_mediodia" ? "mediodia" : t.origin === "optionstrat" ? "prueba" : "cierre");
+const TANDA_LABEL = { mediodia: "Mediodía (11:31 NY)", cierre: "Cierre (15:44 NY)", prueba: "Prueba OptionStrat" };
 const UND_LABEL = { SPX: "S&P 500 (SPX)", NDX: "Nasdaq-100 (NDX)", QQQ: "Nasdaq-100 vía QQQ", DJX: "Dow Jones (DJX)" };
 const REASONS = {
   asignacion: "riesgo de asignación",
@@ -54,7 +56,7 @@ const REASONS = {
 
 const RULES = [
   ["Índices", "SPX (S&P 500), NDX (Nasdaq-100), QQQ (ETF del Nasdaq-100) y DJX (Dow Jones ÷ 100). Una operación por índice y semana, con las mismas reglas. SPX desde el 27-oct-2026; NDX, QQQ y DJX desde el 2-nov-2026."],
-  ["Entrada", "Cada lunes a las 15:44 de Nueva York (martes si el lunes es festivo). Se venden put y call con delta ≈ 0,20 que vencen el viernes y se compran las mismas con vencimiento el siguiente día hábil (normalmente el lunes)."],
+  ["Entrada", "Cada lunes (martes si el lunes es festivo), en dos tandas independientes desde el 2-nov-2026: mediodía a las 11:31 y cierre a las 15:44 de Nueva York (17:31 y 21:44 en España). Se venden put y call con delta ≈ 0,20 que vencen el viernes y se compran las mismas con vencimiento el siguiente día hábil (normalmente el lunes)."],
   ["Precio", "Débito realista: compra de las largas a medio + ¼ de la horquilla y venta de las cortas a medio − ¼. Comisiones por doble calendario: 12 $ en SPX y NDX, 8 $ en DJX y 5,20 $ en QQQ."],
   ["Asignación (QQQ)", "El QQQ tiene opciones americanas con entrega de acciones. No se abre la semana en que cae su fecha ex-dividendo, y se cierra todo si una corta está dentro del dinero con menos de 0,10 de valor temporal o si al día siguiente hay ex-dividendo con la call corta dentro del dinero. Como todo se cierra el viernes a las 15:44, nunca se llega al vencimiento con las cortas abiertas."],
   ["Revisiones", "De martes a viernes a las 10:31, 13:31 y 15:44 de Nueva York (16:31, 19:31 y 21:44 en España, salvo cambio de hora). En cada revisión se guarda el valor, el P&L si se cerrara en ese momento, los breakevens y los niveles de salida."],
@@ -75,6 +77,7 @@ export default function DoubleCalendarExperiment({ session }) {
   const [exits, setExits] = useState([]);
   const [showRules, setShowRules] = useState(false);
   const [und, setUnd] = useState("ALL");
+  const [tanda, setTanda] = useState("ALL");
 
   useEffect(() => {
     let cancelled = false;
@@ -121,7 +124,7 @@ export default function DoubleCalendarExperiment({ session }) {
   }, [trades, exits]);
 
   const calc = useMemo(() => {
-    const ids = new Set(trades.filter((t) => und === "ALL" || (t.underlying || "SPX") === und).map((t) => t.id));
+    const ids = new Set(trades.filter((t) => (und === "ALL" || (t.underlying || "SPX") === und) && (tanda === "ALL" || tandaOf(t) === tanda)).map((t) => t.id));
     const T = trades.filter((t) => ids.has(t.id));
     const M = marks.filter((m) => ids.has(m.trade_id));
     const E = exits.filter((x) => ids.has(x.trade_id));
@@ -160,7 +163,7 @@ export default function DoubleCalendarExperiment({ session }) {
     const isOpen = (t) => BOOKS.some(([b]) => !exitsByTrade[t.id]?.[b]);
     const open = T.filter(isOpen);
     return { exitsByTrade, marksByTrade, stats, chart, open, trades: T };
-  }, [config, trades, marks, exits, und]);
+  }, [config, trades, marks, exits, und, tanda]);
 
   if (loading) return <div className="panel"><div className="empty">Cargando experimento del doble calendario…</div></div>;
   if (!config) {
@@ -234,6 +237,11 @@ export default function DoubleCalendarExperiment({ session }) {
           <button key={k} className={`btn ${und === k ? "" : "btn-ghost"}`} onClick={() => setUnd(k)}>{label}</button>
         ))}
       </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "0 0 12px" }}>
+        {[["ALL", "Todas las tandas"], ["mediodia", "Mediodía"], ["cierre", "Cierre"], ["prueba", "Prueba"]].map(([k, label]) => (
+          <button key={k} className={`btn ${tanda === k ? "" : "btn-ghost"}`} onClick={() => setTanda(k)}>{label}</button>
+        ))}
+      </div>
 
       <div className="cards">
         {BOOKS.map(([b, label]) => {
@@ -268,7 +276,7 @@ export default function DoubleCalendarExperiment({ session }) {
             return (
               <div key={t.id} style={{ marginBottom: 20 }}>
                 <div className="card-sub" style={{ marginBottom: 8 }}>
-                  <strong>{t.underlying || "SPX"} · {strikesTxt(t)}</strong> · cortas {fmtDate(t.short_exp)}, largas {fmtDate(t.long_exp)} · débito{" "}
+                  <strong>{t.underlying || "SPX"} · {strikesTxt(t)}</strong> · {TANDA_LABEL[tandaOf(t)]} · cortas {fmtDate(t.short_exp)}, largas {fmtDate(t.long_exp)} · débito{" "}
                   {fmtMoney(num(t.debit) * 100, 0)} · abierta {fmtNY(t.entry_ts)}
                   {t.origin === "optionstrat" ? " · operación de prueba de OptionStrat" : ""}
                 </div>
@@ -370,6 +378,7 @@ export default function DoubleCalendarExperiment({ session }) {
                 <tr>
                   <th>Semana</th>
                   <th>Índice</th>
+                  <th>Tanda</th>
                   <th>Strikes</th>
                   <th>Vencimientos</th>
                   <th style={th}>Débito</th>
@@ -386,6 +395,7 @@ export default function DoubleCalendarExperiment({ session }) {
                     <tr key={t.id}>
                       <td className="mono">{fmtDate(t.week_start)}</td>
                       <td>{t.underlying || "SPX"}</td>
+                      <td>{TANDA_LABEL[tandaOf(t)]}</td>
                       <td className="mono">{strikesTxt(t)}</td>
                       <td className="mono">{fmtDate(t.short_exp)} / {fmtDate(t.long_exp)}</td>
                       <td style={th}>{fmtMoney(num(t.debit) * 100, 0)}</td>
