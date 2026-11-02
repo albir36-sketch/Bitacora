@@ -69,6 +69,20 @@ function describeLegs(legs) {
     .join(" · ");
 }
 
+// Rentabilidad ponderada en el tiempo a partir de las fotos diarias: cada día rinde
+// valor / (valor del día anterior + aportaciones del día). Devuelve el índice en cada foto.
+function timeWeighted(config, snapshots, capital) {
+  let index = 1, prev = num(config.start_capital), prevDate = config.start_date;
+  const series = snapshots.map((s) => {
+    const flow = capital.filter((c) => c.date > prevDate && c.date <= s.date).reduce((sum, c) => sum + num(c.amount), 0);
+    const v = num(s.portfolio_value);
+    if (prev + flow > 0) index *= v / (prev + flow);
+    prev = v; prevDate = s.date;
+    return index;
+  });
+  return { index, series };
+}
+
 // Mayor caída desde un máximo en una serie de valores.
 function maxDrawdown(values) {
   let peak = -Infinity, dd = 0;
@@ -107,18 +121,20 @@ export default function OptionsExperiment({ session }) {
         // Liquidez invertida en un ETF monetario (XFFE desde el 19-oct-2026).
         supabase.from("optexp_cash").select("*").order("trade_date", { ascending: true }),
         supabase.from("optexp_prices").select("*"),
+        // Aportaciones de capital (90.000 $ el 3-nov-2026 para pasar a 100.000 $).
+        supabase.from("optexp_capital").select("*").order("date", { ascending: true }),
       ]);
       if (cancelled) return;
       const firstErr = res.find((r) => r.error);
       if (firstErr) setError(firstErr.error.message);
-      const [config, trades, legs, snapshots, universe, log, stockConfig, stockPositions, stockPrices, stockSnapshots, dividends, cashTrades, optPrices] = res.map((r) => r.data);
+      const [config, trades, legs, snapshots, universe, log, stockConfig, stockPositions, stockPrices, stockSnapshots, dividends, cashTrades, optPrices, capital] = res.map((r) => r.data);
       const prices = {};
       (stockPrices || []).forEach((r) => { prices[r.ticker] = num(r.price); });
       setData({
         config: config || null, trades: trades || [], legs: legs || [], snapshots: snapshots || [],
         universe: universe || [], log: log || [], stockConfig: stockConfig || null,
         stockPositions: stockPositions || [], prices, stockSnapshots: stockSnapshots || [], dividends: dividends || [],
-        cashTrades: cashTrades || [], optPrices: Object.fromEntries((optPrices || []).map((r) => [r.ticker, { price: num(r.price), date: r.price_date }])),
+        cashTrades: cashTrades || [], capital: capital || [], optPrices: Object.fromEntries((optPrices || []).map((r) => [r.ticker, { price: num(r.price), date: r.price_date }])),
       });
       setLoading(false);
     })();
@@ -127,8 +143,11 @@ export default function OptionsExperiment({ session }) {
 
   const calc = useMemo(() => {
     if (!data?.config) return null;
-    const { config, trades, legs, dividends, prices, stockConfig, stockPositions, cashTrades, optPrices } = data;
+    const { config, trades, legs, dividends, prices, stockConfig, stockPositions, cashTrades, optPrices, capital, snapshots } = data;
     const startCapital = num(config.start_capital);
+    const today = new Date().toISOString().slice(0, 10);
+    const added = capital.filter((c) => c.date <= today).reduce((s, c) => s + num(c.amount), 0);
+    const invested = startCapital + added;
 
     const rows = trades.map((t) => {
       const contracts = num(t.contracts);
@@ -170,7 +189,14 @@ export default function OptionsExperiment({ session }) {
     const cashValue = cashPrice != null ? cashQty * cashPrice : null;
     const cashPnl = cashValue != null ? cashValue - cashCost : 0;
     const cashPending = cashTrades.some((c) => c.price == null);
-    const total = startCapital + realized + unrealized + cashPnl;
+    const total = invested + realized + unrealized + cashPnl;
+    // Rentabilidad ponderada en el tiempo: las aportaciones de capital no cuentan como ganancia.
+    const twr = timeWeighted(config, snapshots, capital);
+    const lastSnap = snapshots[snapshots.length - 1];
+    const lastDate = lastSnap ? lastSnap.date : config.start_date;
+    const lastValue = lastSnap ? num(lastSnap.portfolio_value) : startCapital;
+    const flowAfter = capital.filter((c) => c.date > lastDate && c.date <= today).reduce((s, c) => s + num(c.amount), 0);
+    const portIndex = twr.index * (total / (lastValue + flowAfter));
     const openRisk = open.reduce((s, r) => s + r.maxRisk, 0);
 
     // Estadística por estrategia y del conjunto, solo con operaciones cerradas.
@@ -211,10 +237,10 @@ export default function OptionsExperiment({ session }) {
     }
 
     return {
-      startCapital, total, realized, unrealized, open, closedRows, openRisk, stats, statsTotal,
+      startCapital, invested, added, total, realized, unrealized, open, closedRows, openRisk, stats, statsTotal,
       cashTicker, cashQty, cashValue, cashPnl, cashPending, cashPriceDate: cashTicker ? optPrices[cashTicker]?.date : null,
       openRiskPct: startCapital ? (openRisk / total) * 100 : null,
-      portRet: pct(total, startCapital), spyRet, qqqRet, stockRet,
+      portRet: (portIndex - 1) * 100, spyRet, qqqRet, stockRet,
       feesTotal: rows.reduce((s, r) => s + r.fees, 0),
     };
   }, [data]);
@@ -223,18 +249,19 @@ export default function OptionsExperiment({ session }) {
   // acciones se toma de su foto más reciente en esa fecha o antes, sumándole los dividendos cobrados.
   const chartData = useMemo(() => {
     if (!data?.config || data.snapshots.length === 0) return [];
-    const { config, snapshots, stockConfig, stockSnapshots, stockPositions, dividends } = data;
-    const cap = num(config.start_capital), spy0 = num(config.spy_start), qqq0 = num(config.qqq_start);
+    const { config, snapshots, stockConfig, stockSnapshots, stockPositions, dividends, capital } = data;
+    const twr = timeWeighted(config, snapshots, capital);
+    const spy0 = num(config.spy_start), qqq0 = num(config.qqq_start);
     const stockCap = stockConfig ? num(stockConfig.start_capital) : null;
     const stockDivsUpTo = (date) => stockPositions.reduce((sum, p) => {
       const to = p.exit_date != null && p.exit_date < date ? p.exit_date : date;
       return sum + num(p.qty) * divsBetween(dividends, p.ticker, p.entry_date, to);
     }, 0);
-    return snapshots.map((s) => {
+    return snapshots.map((s, i) => {
       const stockSnap = [...stockSnapshots].reverse().find((x) => x.date <= s.date);
       return {
         date: fmtDate(s.date),
-        opciones: (num(s.portfolio_value) / cap) * 100,
+        opciones: twr.series[i] * 100,
         acciones: stockSnap && stockCap ? ((num(stockSnap.portfolio_value) + stockDivsUpTo(s.date)) / stockCap) * 100 : null,
         spy: ((num(s.spy_price) + divsBetween(dividends, "SPY", config.start_date, s.date)) / spy0) * 100,
         qqq: ((num(s.qqq_price) + divsBetween(dividends, "QQQ", config.start_date, s.date)) / qqq0) * 100,
@@ -275,7 +302,7 @@ export default function OptionsExperiment({ session }) {
         <div className="eyebrow">EXPERIMENTO · CARTERA TEÓRICA DE OPCIONES</div>
         <div className="h1">¿Rinde más vender prima que tener las acciones?</div>
         <div className="card-sub" style={{ marginTop: 4 }}>
-          Desde el {fmtDate(config.start_date)} con {fmtMoney(calc.startCapital, 0)} teóricos · spreads de riesgo definido · comisión de {fmtMoney(num(config.commission_per_contract))} por contrato · {calc.cashTicker ? `liquidez en ${calc.cashTicker} (tipo a un día del dólar) desde el 19-oct-2026; antes no cobraba intereses` : "la liquidez no cobra intereses"}
+          Desde el {fmtDate(config.start_date)} con {fmtMoney(calc.startCapital, 0)} teóricos{calc.added ? `, ${fmtMoney(calc.invested, 0)} desde el 3-nov-2026 (la rentabilidad se mide sin contar las aportaciones)` : ""} · spreads de riesgo definido · comisión de {fmtMoney(num(config.commission_per_contract))} por contrato · {calc.cashTicker ? `liquidez en ${calc.cashTicker} (tipo a un día del dólar) desde el 19-oct-2026; antes no cobraba intereses` : "la liquidez no cobra intereses"}
         </div>
       </div>
 
