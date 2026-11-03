@@ -3,13 +3,12 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart, Shield, Target, Timer, CalendarRange } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart, Shield, Timer, CalendarRange } from "lucide-react";
 import Analysis from "./Analysis";
 import Experiment from "./Experiment";
 import OptionsExperiment from "./OptionsExperiment";
 import EtfExperiment from "./EtfExperiment";
 import CoveredCallExperiment from "./CoveredCallExperiment";
-import ItmCallsExperiment from "./ItmCallsExperiment";
 import IntradayExperiment from "./IntradayExperiment";
 import DoubleCalendarExperiment from "./DoubleCalendarExperiment";
 import { supabase } from "./supabaseClient";
@@ -1403,7 +1402,6 @@ export default function Dashboard({ session }) {
             { id: "options-experiment", label: "Exp. opciones", icon: Layers },
             { id: "etf-experiment", label: "Exp. ETF", icon: PieChart },
             { id: "cc-experiment", label: "Exp. covered calls", icon: Shield },
-            { id: "itm-experiment", label: "Exp. calls ITM", icon: Target },
             { id: "intraday-experiment", label: "Exp. intradía", icon: Timer },
             { id: "dc-experiment", label: "Exp. doble calendario", icon: CalendarRange },
           ].map((item) => (
@@ -2012,7 +2010,6 @@ export default function Dashboard({ session }) {
         {view === "options-experiment" && <OptionsExperiment session={session} />}
         {view === "etf-experiment" && <EtfExperiment session={session} />}
         {view === "cc-experiment" && <CoveredCallExperiment session={session} />}
-        {view === "itm-experiment" && <ItmCallsExperiment session={session} />}
         {view === "intraday-experiment" && <IntradayExperiment session={session} />}
         {view === "dc-experiment" && <DoubleCalendarExperiment session={session} />}
         </div>
