@@ -8,7 +8,7 @@ import { supabase } from "./supabaseClient";
 // Experimento EN VIVO del doble calendario semanal en SPX, NDX, QQQ y DJX (cartera TEÓRICA; SPX desde el 27-oct-2026, el resto desde el 2-nov-2026).
 // Entrada el lunes a las 15:44 NY: put y call a delta 0,20 que vencen el viernes, largas del siguiente día hábil.
 // Revisiones de martes a viernes a las 10:31, 13:31 y 15:44 NY (tareas programadas) → dcexp_marks y dcexp_exits.
-// Cuatro libros con la misma operación: regla de Rafa a 0,3 % y a 0,2 % del breakeven, +25 % del débito y viernes.
+// Seis libros con la misma operación: regla de Rafa a 0,3 % y 0,2 %, +25 % del débito, toque de strike, antes del evento y viernes.
 // debit, value_* son por acción (×100 = $); pnl ya está en dólares por doble calendario (con 12 $ de comisiones).
 
 const num = (v) => (v == null ? null : Number(v));
@@ -33,12 +33,13 @@ const fmtNY = (ts) => {
 };
 const signColor = (n) => (n == null || Number.isNaN(n) || n === 0 ? "var(--muted)" : n > 0 ? "var(--gain)" : "var(--loss)");
 
-const COLORS = { rafa_03: "#34D399", rafa_02: "#F472B6", pct_25: "#60A5FA", toque_strike: "#A78BFA", viernes: "#E8A33D" };
+const COLORS = { rafa_03: "#34D399", rafa_02: "#F472B6", pct_25: "#60A5FA", toque_strike: "#A78BFA", pre_evento: "#F87171", viernes: "#E8A33D" };
 const BOOKS = [
   ["rafa_03", "Regla de Rafa · 0,3 %"],
   ["rafa_02", "Regla de Rafa · 0,2 %"],
   ["pct_25", "Objetivo +25 %"],
   ["toque_strike", "Toque de strike"],
+  ["pre_evento", "Antes del evento"],
   ["viernes", "Hasta el viernes"],
 ];
 const UNDERLYINGS = ["SPX", "NDX", "QQQ", "DJX"];
@@ -51,6 +52,8 @@ const REASONS = {
   nivel_superior: "nivel superior",
   objetivo_25: "objetivo +25 %",
   toque_strike: "toque de strike",
+  pre_evento: "antes del evento",
+  pre_evento_retro: "antes del evento (aplicado a posteriori)",
   viernes: "viernes",
 };
 
@@ -64,6 +67,7 @@ const RULES = [
   ["Regla de Rafa (0,2 %)", "Igual, con la salida 0,2 % antes del breakeven. Se lleva para comparar."],
   ["Objetivo +25 %", "Se cierra cuando el P&L llega al 25 % del débito pagado."],
   ["Toque de strike", "Añadido el 29-oct-2026 (idea de Rafa). Desde el día siguiente a la entrada, en cada revisión se mira el máximo y el mínimo del índice desde la revisión anterior. Si el precio ha tocado el strike de la put o el de la call, se cierra en la primera revisión en que la operación vaya en beneficio (puede ser esa misma). Si no llega a ir en beneficio, se cierra el viernes."],
+  ["Antes del evento", "Añadido el 4-nov-2026 (idea de Rafa, tras la caída de volatilidad después de las elecciones). Cada semana se apuntan los eventos importantes (Fed, IPC, empleo, elecciones). En la última revisión antes del evento, si la operación va en beneficio, se cierra para vender cerca del pico de volatilidad. Si va en pérdida, o la semana no tiene eventos, se aguanta hasta el viernes. Los cierres de las semanas del 26-oct y del 2-nov se aplicaron a posteriori con las revisiones ya guardadas."],
   ["Hasta el viernes", "Se cierra en la revisión de las 15:44 del viernes. Todos los libros que sigan abiertos ese día se cierran también a esa hora."],
   ["Modelo", "Black-Scholes con la volatilidad de cada pata fija y anclado al valor de mercado del momento. Los niveles pueden diferir ~0,1 % de los de OptionStrat porque aquí se usan los precios reales de IBKR."],
 ];
@@ -75,6 +79,7 @@ export default function DoubleCalendarExperiment({ session }) {
   const [trades, setTrades] = useState([]);
   const [marks, setMarks] = useState([]);
   const [exits, setExits] = useState([]);
+  const [events, setEvents] = useState([]);
   const [showRules, setShowRules] = useState(false);
   const [und, setUnd] = useState("ALL");
   const [tanda, setTanda] = useState("ALL");
@@ -83,11 +88,12 @@ export default function DoubleCalendarExperiment({ session }) {
     let cancelled = false;
     (async () => {
       const uid = session.user.id;
-      const [c, t, m, e] = await Promise.all([
+      const [c, t, m, e, ev] = await Promise.all([
         supabase.from("dcexp_config").select("user_id,start_date").eq("user_id", uid).maybeSingle(),
         supabase.from("dcexp_trades").select("*").eq("user_id", uid).order("entry_ts", { ascending: false }),
         supabase.from("dcexp_marks").select("*").eq("user_id", uid).order("ts", { ascending: true }),
         supabase.from("dcexp_exits").select("*").eq("user_id", uid).order("exit_ts", { ascending: true }),
+        supabase.from("dcexp_events").select("*").eq("user_id", uid).order("event_ts", { ascending: false }).limit(20),
       ]);
       if (cancelled) return;
       const err = [c, t, m, e].find((r) => r.error);
@@ -96,6 +102,7 @@ export default function DoubleCalendarExperiment({ session }) {
       setTrades(t.data || []);
       setMarks(m.data || []);
       setExits(e.data || []);
+      setEvents(ev.error ? [] : ev.data || []);
       setLoading(false);
     })();
     return () => { cancelled = true; };
@@ -188,11 +195,31 @@ export default function DoubleCalendarExperiment({ session }) {
         <div className="card-sub" style={{ marginTop: 4 }}>
           Cartera teórica desde el {fmtDate(config.start_date)}, con precios reales de IBKR y sin órdenes. Cada lunes se abre un
           doble calendario en cada índice (SPX, NDX, QQQ y DJX; strikes a delta 0,20, cortas del viernes y largas del lunes
-          siguiente) y se revisa tres veces al día hasta el viernes. Cinco libros con la misma operación comparan cuándo cerrar: la regla de Rafa a 0,3 % y a 0,2 %
-          del breakeven, un objetivo del +25 % del débito, salir al tocar un strike vendido y aguantar hasta el viernes. Resultados en $ por doble calendario,
+          siguiente) y se revisa tres veces al día hasta el viernes. Seis libros con la misma operación comparan cuándo cerrar: la regla de Rafa a 0,3 % y a 0,2 %
+          del breakeven, un objetivo del +25 % del débito, salir al tocar un strike vendido, salir antes de un evento importante y aguantar hasta el viernes. Resultados en $ por doble calendario,
           con comisiones.
         </div>
       </div>
+
+      {events.length > 0 && (
+        <div className="panel">
+          <div className="panel-head"><div className="panel-title">Eventos de la semana</div></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Semana</th><th>Evento</th><th>Fecha y hora</th></tr></thead>
+              <tbody>
+                {events.slice(0, 8).map((ev) => (
+                  <tr key={ev.id}>
+                    <td>{fmtDate(ev.week_start)}</td>
+                    <td>{ev.name}</td>
+                    <td>{ev.event_ts ? fmtNY(ev.event_ts) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="panel">
         <div className="panel-head"><div className="panel-title">Resumen por índice</div></div>
