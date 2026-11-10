@@ -41,6 +41,18 @@ const MVS_SLOTS = ["13", "14", "15"];
 const MVS_BASES = [["oi", "Interés abierto"], ["vol", "Volumen de hoy"]];
 const MVS_BOOKS = MVS_BASES.flatMap(([base, bl]) => MVS_SLOTS.map((h) => [`mvs_${base}_${h}`, `${bl} · ${h}:00`, base, h]));
 
+// Árbol de decisión de final de sesión (desde el 10-nov-2026): idxexp_struct guarda, en las tomas de las 14 y 15 h,
+// 10 estructuras valoradas con la cadena real; chosen = true es la que elige el árbol (una al día), el resto es «sombra».
+const STRUCT_KINDS = [
+  ["mariposa", "Iron butterfly en el MVS"],
+  ["condor", "Iron condor fuera de los muros"],
+  ["dir_iman", "Direccional hacia el MVS (imán)"],
+  ["dir_muro", "Direccional detrás del MVS (muro)"],
+  ["dir_tendencia", "Direccional a favor del día"],
+];
+const legsText = (legs) =>
+  (legs || []).map((l) => `${l.q > 0 ? "+" : "−"}${l.t}${Math.round(Number(l.k))}`).join(" ");
+
 const RULES = [
   ["Libro «señal»", "Velas de 5 min del SPX. Señal alcista: dos cierres seguidos por encima de la media de 30, el segundo más alto que el primero y el anterior por debajo. Solo cuenta si la vela cierra entre las 10:00 y las 12:00 de Nueva York. La primera señal del día abre un put credit spread. Sin calls."],
   ["Libro «control»", "El mismo put spread cada día con la vela que cierra a las 10:30, sin señal. Sirve para saber si la señal aporta o si lo que gana es vender prima."],
@@ -51,6 +63,7 @@ const RULES = [
   ["Salida", "Sin stop ni objetivo: se deja vencer. Liquidación con el cierre del SPX."],
   ["Tamaño", "1 spread por operación sobre 10.000 $. Pérdida máxima unos 940 $."],
   ["Libros MVS (final de sesión)", "Añadidos el 6-nov-2026 (idea de Rafa con Sigma Trade). A las 13:01, 14:01 y 15:01 de NY se calcula con IBKR el MVS del 0DTE (strike con más gamma neta de los dealers, a ±100 puntos del precio), con interés abierto y con el volumen del día. SPX por debajo del MVS → bear call spread con la vendida en MVS + 5; por encima → bull put spread con la vendida en MVS − 5. Ancho 10, crédito = medio − 0,10, comisiones 3 $, se deja vencer. Seis libros: 2 bases × 3 horas."],
+  ["Árbol de final de sesión", "Añadido el 10-nov-2026 (idea de Rafa: no hacer siempre lo mismo). A las 14:00 de NY (y, si no hay entrada, a las 15:00) se mira el régimen de gamma del 0DTE y la posición del precio. Gamma positiva y precio cerca del MVS (menos de medio movimiento esperado hasta el cierre) → iron butterfly de 10 en el MVS. Gamma positiva con Put Wall y Call Wall separados (≥ 20 puntos) y el precio entre ellos → iron condor de 10 con las vendidas 10 puntos por fuera de los muros. Gamma positiva y precio lejos del MVS → spread de 10 hacia el MVS (put spread bajo el precio si está por debajo del MVS, call spread sobre el precio si está por encima). Gamma negativa y el SPX lejos de la apertura → spread de 10 a favor del movimiento del día, detrás del MVS. Si no, no se opera. Una operación al día, se deja vencer. Las demás estructuras (alas de 5 y de 10) se valoran en la sombra para comparar."],
   ["Seguimiento", "Se anotan sin aplicarlos: VIX1D, gamma del día anterior, días macro y si antes de entrar se barrió el mínimo del día anterior (candidato a filtro)."],
 ];
 
@@ -61,22 +74,25 @@ export default function IntradayExperiment({ session }) {
   const [days, setDays] = useState([]);
   const [trades, setTrades] = useState([]);
   const [mvs, setMvs] = useState([]);
+  const [structs, setStructs] = useState([]);
   const [showRules, setShowRules] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const uid = session.user.id;
-      const [c, d, t, m] = await Promise.all([
+      const [c, d, t, m, x] = await Promise.all([
         supabase.from("idxexp_config").select("*").eq("user_id", uid).maybeSingle(),
         supabase.from("idxexp_days").select("*").eq("user_id", uid).order("date", { ascending: false }),
         supabase.from("idxexp_trades").select("*").eq("user_id", uid).order("trade_date", { ascending: false }),
         supabase.from("idxexp_mvs").select("id,date,slot,ts,spx,atm_iv,mvs_oi,mvs_vol,flip_oi,put_wall_oi,call_wall_oi,net_gex_oi,notes").eq("user_id", uid).order("date", { ascending: false }).order("slot", { ascending: true }),
+        supabase.from("idxexp_struct").select("id,date,slot,kind,chosen,regime,rule,spx_entry,mvs_oi,em_points,legs,credit,max_loss,spx_settle,pnl").eq("user_id", uid).order("date", { ascending: false }).order("slot", { ascending: true }),
       ]);
       if (cancelled) return;
       const err = [c, d, t].find((r) => r.error);
       // idxexp_mvs puede no tener filas aún; su error no bloquea el resto
       setMvs(m.error ? [] : m.data || []);
+      setStructs(x.error ? [] : x.data || []);
       if (err) setError(err.error.message);
       setConfig(c.data);
       setDays(d.data || []);
@@ -152,8 +168,39 @@ export default function IntradayExperiment({ session }) {
         maxDD: dd,
       };
     }
-    return { capital, stats, chart, sweep, signalDays, nDays: days.length, mvsStats };
-  }, [config, days, trades]);
+    // árbol: la elegida de cada día; sombra: cada estructura por tipo y ancho, por régimen
+    const settled = structs.filter((r) => r.pnl != null);
+    const chosen = settled.filter((r) => r.chosen);
+    const sumStats = (arr) => {
+      const total = arr.reduce((s, r) => s + num(r.pnl), 0);
+      return {
+        n: arr.length, total, avg: arr.length ? total / arr.length : null,
+        winRate: arr.length ? (arr.filter((r) => num(r.pnl) > 0).length / arr.length) * 100 : null,
+      };
+    };
+    const tree = sumStats(chosen);
+    const shadow = [];
+    for (const [base, label] of STRUCT_KINDS) {
+      for (const w of [10, 5]) {
+        const kind = `${base}_${w}`;
+        const arr = settled.filter((r) => r.kind === kind);
+        shadow.push({
+          kind, label: `${label} · alas ${w}`,
+          all: sumStats(arr),
+          pos: sumStats(arr.filter((r) => r.regime === "positiva")),
+          neg: sumStats(arr.filter((r) => r.regime === "negativa")),
+        });
+      }
+    }
+    const treeDays = [...new Set(structs.map((r) => r.date))].sort().reverse().map((date) => {
+      const rows = structs.filter((r) => r.date === date);
+      const pick = rows.find((r) => r.chosen);
+      const best = rows.filter((r) => r.pnl != null).sort((a, b2) => num(b2.pnl) - num(a.pnl))[0];
+      const first = rows[0];
+      return { date, pick, best, regime: (pick || first)?.regime, rule: (pick || rows.find((r) => r.slot === "15") || first)?.rule };
+    });
+    return { capital, stats, chart, sweep, signalDays, nDays: days.length, mvsStats, tree, shadow, treeDays };
+  }, [config, days, trades, structs]);
 
   if (loading) return <div className="panel"><div className="empty">Cargando experimento intradía…</div></div>;
   if (!config) {
@@ -400,6 +447,72 @@ export default function IntradayExperiment({ session }) {
             </table>
           </div>
         )}
+      </div>
+
+
+      <div className="panel">
+        <div className="panel-head"><div className="panel-title">Árbol de final de sesión (desde el 10-nov-2026)</div></div>
+        <div className="card-sub" style={{ marginBottom: 8 }}>
+          Cada día se elige una estructura según la gamma del 0DTE y la posición del precio respecto al MVS (ver «Reglas»). Todas
+          las demás se valoran con los mismos precios para comparar: si el árbol gana a hacer siempre lo mismo, la elección aporta.
+          El 6 y el 9-nov están reconstruidos con la cadena guardada en las tomas.
+        </div>
+        <div className="cards">
+          <div className="card">
+            <div className="card-label">Árbol (la elegida cada día)</div>
+            <div className="card-value big" style={{ color: signColor(calc.tree.total) }}>{calc.tree.n ? fmtSigned(calc.tree.total, 0) : "—"}</div>
+            <div className="card-sub">
+              {calc.tree.n} {calc.tree.n === 1 ? "operación" : "operaciones"} · media {calc.tree.avg == null ? "—" : fmtSigned(calc.tree.avg, 0)} · acierto {calc.tree.winRate == null ? "—" : `${fmtNum(calc.tree.winRate, 0)}%`}
+            </div>
+          </div>
+        </div>
+        {calc.treeDays.length > 0 && (
+          <div className="table-wrap" style={{ marginTop: 12 }}>
+            <table>
+              <thead>
+                <tr><th>Fecha</th><th>Gamma</th><th>Regla</th><th>Elegida</th><th style={th}>Crédito</th><th style={th}>Resultado</th><th>Mejor de la sombra</th><th style={th}>Resultado</th></tr>
+              </thead>
+              <tbody>
+                {calc.treeDays.map((d) => (
+                  <tr key={d.date}>
+                    <td className="mono">{fmtDate(d.date)}</td>
+                    <td>{d.regime || "—"}</td>
+                    <td>{d.rule || "—"}</td>
+                    <td className="mono">{d.pick ? `${d.pick.kind} ${d.pick.slot}h · ${legsText(d.pick.legs)}` : "Sin entrada"}</td>
+                    <td style={th}>{d.pick ? fmtNum(num(d.pick.credit), 2) : "—"}</td>
+                    <td style={{ ...th, color: signColor(num(d.pick?.pnl)) }}>{d.pick ? (d.pick.pnl == null ? "abierta" : fmtSigned(num(d.pick.pnl), 0)) : "—"}</td>
+                    <td className="mono">{d.best ? `${d.best.kind} ${d.best.slot}h` : "—"}</td>
+                    <td style={{ ...th, color: signColor(num(d.best?.pnl)) }}>{d.best ? fmtSigned(num(d.best.pnl), 0) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="panel-head" style={{ marginTop: 16 }}><div className="panel-title">Sombra: cada estructura todos los días (tomas de 14 y 15 h)</div></div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Estructura</th><th style={th}>Op.</th><th style={th}>Resultado</th><th style={th}>Media</th><th style={th}>Acierto</th>
+                <th style={th}>Gamma + (op. · media)</th><th style={th}>Gamma − (op. · media)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {calc.shadow.map((r) => (
+                <tr key={r.kind}>
+                  <td>{r.label}</td>
+                  <td style={th}>{r.all.n}</td>
+                  <td style={{ ...th, color: signColor(r.all.total) }}>{r.all.n ? fmtSigned(r.all.total, 0) : "—"}</td>
+                  <td style={{ ...th, color: signColor(r.all.avg) }}>{r.all.avg == null ? "—" : fmtSigned(r.all.avg, 0)}</td>
+                  <td style={th}>{r.all.winRate == null ? "—" : `${fmtNum(r.all.winRate, 0)}%`}</td>
+                  <td style={{ ...th, color: signColor(r.pos.avg) }}>{r.pos.n ? `${r.pos.n} · ${fmtSigned(r.pos.avg, 0)}` : "—"}</td>
+                  <td style={{ ...th, color: signColor(r.neg.avg) }}>{r.neg.n ? `${r.neg.n} · ${fmtSigned(r.neg.avg, 0)}` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="panel">
