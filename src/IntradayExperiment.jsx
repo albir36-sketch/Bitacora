@@ -53,6 +53,13 @@ const STRUCT_KINDS = [
 const legsText = (legs) =>
   (legs || []).map((l) => `${l.q > 0 ? "+" : "−"}${l.t}${Math.round(Number(l.k))}`).join(" ");
 
+const SUBTABS = [
+  ["manana", "Spreads de la mañana (10-12 h)"],
+  ["mvs", "Libros MVS (13-15 h)"],
+  ["arbol", "Árbol de final de sesión"],
+  ["reglas", "Reglas"],
+];
+
 const RULES = [
   ["Libro «señal»", "Velas de 5 min del SPX. Señal alcista: dos cierres seguidos por encima de la media de 30, el segundo más alto que el primero y el anterior por debajo. Solo cuenta si la vela cierra entre las 10:00 y las 12:00 de Nueva York. La primera señal del día abre un put credit spread. Sin calls."],
   ["Libro «control»", "El mismo put spread cada día con la vela que cierra a las 10:30, sin señal. Sirve para saber si la señal aporta o si lo que gana es vender prima."],
@@ -75,7 +82,11 @@ export default function IntradayExperiment({ session }) {
   const [trades, setTrades] = useState([]);
   const [mvs, setMvs] = useState([]);
   const [structs, setStructs] = useState([]);
-  const [showRules, setShowRules] = useState(false);
+  const [showRules, setShowRules] = useState(true);
+  const [subtab, setSubtab] = useState(() => {
+    try { return localStorage.getItem("idxexp_subtab") || "manana"; } catch { return "manana"; }
+  });
+  useEffect(() => { try { localStorage.setItem("idxexp_subtab", subtab); } catch { /* sin almacenamiento */ } }, [subtab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -222,13 +233,22 @@ export default function IntradayExperiment({ session }) {
 
       <div className="panel">
         <div className="eyebrow">EXPERIMENTO · INTRADÍA 0DTE EN EL SPX</div>
+        <div className="tabs" style={{ flexWrap: "wrap", marginTop: 8 }}>
+          {SUBTABS.map(([k, label]) => (
+            <button key={k} className={`tab ${subtab === k ? "active" : ""}`} onClick={() => setSubtab(k)}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {subtab === "manana" && (
+        <>
+      <div className="panel">
         <div className="h1">¿Aporta la señal de la media 30 al vender puts del mismo día?</div>
         <div className="card-sub" style={{ marginTop: 4 }}>
           Cartera teórica de {fmtMoney(calc.capital, 0)} desde el {fmtDate(config.start_date)}. Cuatro libros de put credit spreads
           0DTE con precios reales de IBKR: uno abre cuando salta la señal de la media de 30 en 5 minutos, otro cuando el
           precio toca la EMA 35 con la media subiendo, otro igual que el de la señal pero con la pata vendida en delta 0,20, y el último vende todos los días a las 10:30 como control. Se deja vencer, sin stop. Cada día laborable, a las 16:27 de
-          Nueva York, una tarea programada anota la sesión. Desde el 6-nov-2026 hay además seis libros de final de sesión que venden
-          junto al MVS del 0DTE (más abajo).
+          Nueva York, una tarea programada anota la sesión. Los libros de final de sesión con el MVS y el árbol están en sus pestañas.
         </div>
       </div>
 
@@ -363,8 +383,10 @@ export default function IntradayExperiment({ session }) {
           </table>
         </div>
       </div>
-
-
+        </>
+      )}
+      {subtab === "mvs" && (
+        <>
       <div className="panel">
         <div className="panel-head"><div className="panel-title">Libros MVS de final de sesión (desde el 6-nov-2026)</div></div>
         <div className="card-sub" style={{ marginBottom: 8 }}>
@@ -448,8 +470,10 @@ export default function IntradayExperiment({ session }) {
           </div>
         )}
       </div>
-
-
+        </>
+      )}
+      {subtab === "arbol" && (
+        <>
       <div className="panel">
         <div className="panel-head"><div className="panel-title">Árbol de final de sesión (desde el 10-nov-2026)</div></div>
         <div className="card-sub" style={{ marginBottom: 8 }}>
@@ -514,7 +538,10 @@ export default function IntradayExperiment({ session }) {
           </table>
         </div>
       </div>
-
+        </>
+      )}
+      {subtab === "reglas" && (
+        <>
       <div className="panel">
         <div className="panel-head">
           <div className="panel-title">Reglas</div>
@@ -535,6 +562,8 @@ export default function IntradayExperiment({ session }) {
           </div>
         )}
       </div>
+        </>
+      )}
     </>
   );
 }
