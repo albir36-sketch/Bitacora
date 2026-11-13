@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart, Shield, Timer, CalendarRange, Rocket } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart, Shield, Timer, CalendarRange, Rocket, Target } from "lucide-react";
 import Analysis from "./Analysis";
 import Experiment from "./Experiment";
 import OptionsExperiment from "./OptionsExperiment";
@@ -11,6 +11,7 @@ import EtfExperiment from "./EtfExperiment";
 import CoveredCallExperiment from "./CoveredCallExperiment";
 import IntradayExperiment from "./IntradayExperiment";
 import DoubleCalendarExperiment from "./DoubleCalendarExperiment";
+import RiskDefinedExperiment from "./RiskDefinedExperiment";
 import DisruptiveExperiment from "./DisruptiveExperiment";
 import { supabase } from "./supabaseClient";
 
@@ -1405,6 +1406,7 @@ export default function Dashboard({ session }) {
             { id: "cc-experiment", label: "Exp. covered calls", icon: Shield },
             { id: "intraday-experiment", label: "Exp. intradía", icon: Timer },
             { id: "dc-experiment", label: "Exp. doble calendario", icon: CalendarRange },
+            { id: "rd-experiment", label: "Exp. riesgo definido", icon: Target },
             { id: "dis-experiment", label: "Exp. disruptivas", icon: Rocket },
           ].map((item) => (
             <button
@@ -2014,6 +2016,7 @@ export default function Dashboard({ session }) {
         {view === "cc-experiment" && <CoveredCallExperiment session={session} />}
         {view === "intraday-experiment" && <IntradayExperiment session={session} />}
         {view === "dc-experiment" && <DoubleCalendarExperiment session={session} />}
+        {view === "rd-experiment" && <RiskDefinedExperiment session={session} />}
         {view === "dis-experiment" && <DisruptiveExperiment session={session} />}
         </div>
       </div>
