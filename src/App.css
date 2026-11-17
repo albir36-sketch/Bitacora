@@ -58,6 +58,10 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 thead th { text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); padding-bottom: 8px; padding-right: 10px; }
 tbody td { padding: 8px 10px 8px 0; border-top: 1px solid var(--border); }
 .table-wrap { overflow-x: auto; }
+/* Tablas largas: la barra horizontal queda siempre a la vista y la cabecera fija */
+.table-scroll { max-height: 65vh; overflow: auto; }
+.table-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); padding-top: 4px; }
+.note-clip { max-width: 380px; min-width: 220px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
 .tabs { display: flex; gap: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
 .tab { padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; }

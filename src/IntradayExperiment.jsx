@@ -309,7 +309,7 @@ export default function IntradayExperiment({ session }) {
         {days.length === 0 ? (
           <div className="empty">Todavía no hay sesiones registradas.</div>
         ) : (
-          <div className="table-wrap">
+          <div className="table-wrap table-scroll">
             <table>
               <thead>
                 <tr>
@@ -344,7 +344,7 @@ export default function IntradayExperiment({ session }) {
                         ];
                       })}
                       <td>{d.swept_prev_low_at_entry == null ? "—" : d.swept_prev_low_at_entry ? "Sí" : "No"}</td>
-                      <td style={{ color: "var(--muted)", fontSize: 13 }}>{[d.macro, d.notes].filter(Boolean).join(" · ") || ""}</td>
+                      <td style={{ color: "var(--muted)", fontSize: 13 }}>{(() => { const n = [d.macro, d.notes].filter(Boolean).join(" · "); return n ? <div className="note-clip" title={n}>{n}</div> : ""; })()}</td>
                     </tr>
                   );
                 })}
@@ -427,7 +427,7 @@ export default function IntradayExperiment({ session }) {
         {mvs.length === 0 ? (
           <div className="empty">La primera toma será el 6-nov-2026 a las 13:01 de Nueva York (19:01 en España).</div>
         ) : (
-          <div className="table-wrap">
+          <div className="table-wrap table-scroll">
             <table>
               <thead>
                 <tr>
@@ -462,7 +462,7 @@ export default function IntradayExperiment({ session }) {
                         </td>,
                       ];
                     })}
-                    <td style={{ color: "var(--muted)", fontSize: 13 }}>{r.notes || ""}</td>
+                    <td style={{ color: "var(--muted)", fontSize: 13 }}>{r.notes ? <div className="note-clip" title={r.notes}>{r.notes}</div> : ""}</td>
                   </tr>
                 ))}
               </tbody>
@@ -514,7 +514,7 @@ export default function IntradayExperiment({ session }) {
           </div>
         )}
         <div className="panel-head" style={{ marginTop: 16 }}><div className="panel-title">Sombra: cada estructura todos los días (tomas de 14 y 15 h)</div></div>
-        <div className="table-wrap">
+        <div className="table-wrap table-scroll">
           <table>
             <thead>
               <tr>
