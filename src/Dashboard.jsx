@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart, Shield, Timer, CalendarRange, Rocket, Target } from "lucide-react";
+import { Plus, X, Trash2, CheckCircle2, RotateCcw, LogOut, LayoutDashboard, Briefcase, Wallet, ListOrdered, Menu, Percent, TrendingUp, Search, Settings, Upload, AlertTriangle, RefreshCw, FlaskConical, Layers, PieChart, Shield, Timer, CalendarRange, Rocket, Target, ChevronDown, ChevronRight } from "lucide-react";
 import Analysis from "./Analysis";
 import Experiment from "./Experiment";
 import OptionsExperiment from "./OptionsExperiment";
@@ -443,6 +443,7 @@ export default function Dashboard({ session }) {
   const [showImport, setShowImport] = useState(false);
   const [closingTrade, setClosingTrade] = useState(null);
   const [tab, setTab] = useState("open");
+  const [expandedTicker, setExpandedTicker] = useState(null);
   const [tickerFilter, setTickerFilter] = useState("");
   const [period, setPeriod] = useState("mtd");
   const [dashboardPeriod, setDashboardPeriod] = useState("all");
@@ -946,7 +947,9 @@ export default function Dashboard({ session }) {
   // comprar más tarde, las Covered Calls del lote antiguo (ya liquidado) no cuentan para el nuevo.
   // Los DIVIDENDOS se filtran con el mismo criterio de "lote actual": un dividendo cobrado sobre
   // acciones que ya vendiste del todo antes de volver a comprar no debe rebajar el coste de las nuevas.
-  const tickerAdjusted = useMemo(() => {
+  const { rows: tickerAdjusted, countedById } = useMemo(() => {
+    // Para el historial de cada ticker: qué parte de cada opción/dividendo cuenta en el $ Ajustado.
+    const countedById = {};
     const optAssignedMap = {};
     const optFullMap = {};
     const divMap = {};
@@ -983,8 +986,10 @@ export default function Dashboard({ session }) {
         const remaining = lotRemainingByTradeId[lot.id] ?? 0;
         const lotFraction = lot.qty > 0 ? Math.min(1, remaining / lot.qty) : 0;
         optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + pnl * lotFraction;
+        countedById[t.id] = { amount: pnl * lotFraction, note: lotFraction < 0.9999 ? `${(lotFraction * 100).toFixed(0)}% (solo la parte de ese lote que aún conservas)` : "" };
       } else {
         optAssignedMap[t.ticker] = (optAssignedMap[t.ticker] || 0) + pnl;
+        countedById[t.id] = { amount: pnl, prorate: true };
       }
     }
     for (const t of closedOptions) {
@@ -992,16 +997,23 @@ export default function Dashboard({ session }) {
       if (!isCoveredCallLike(t)) continue; // solo calls: un put cerrado no rebaja el coste de las acciones
       const epochStart = currentEpochStart(stockTrades, t.ticker);
       if (!epochStart || t.date < epochStart) continue; // pertenece a un lote ya vendido del todo, no al actual
-      optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + optionPnL(t, tradesById);
+      const pnl = optionPnL(t, tradesById);
+      optFullMap[t.ticker] = (optFullMap[t.ticker] || 0) + pnl;
+      countedById[t.id] = { amount: pnl, note: "" };
     }
     for (const d of dividends) {
       const epochStart = currentEpochStart(stockTrades, d.ticker);
       if (!epochStart || d.date < epochStart) continue; // dividendo de un lote ya vendido del todo: no cuenta
       divMap[d.ticker] = (divMap[d.ticker] || 0) + d.amount;
+      countedById[d.id] = { amount: d.amount, note: "" };
     }
-    return openPositions.map((p) => {
+    const rows = openPositions.map((p) => {
       const totalBought = totalBoughtByTicker[p.ticker] || p.shares;
       const keptFraction = totalBought > 0 ? Math.min(1, p.shares / totalBought) : 1;
+      for (const t of assignedOptions) {
+        const c = countedById[t.id];
+        if (t.ticker === p.ticker && c && c.prorate) { c.amount = c.amount * keptFraction; c.note = keptFraction < 0.9999 ? `${(keptFraction * 100).toFixed(0)}% (prorrateado a las acciones que conservas)` : ""; }
+      }
       const optIncome = (optAssignedMap[p.ticker] || 0) * keptFraction + (optFullMap[p.ticker] || 0);
       const divIncome = divMap[p.ticker] || 0;
       const totalIncome = optIncome + divIncome;
@@ -1012,6 +1024,7 @@ export default function Dashboard({ session }) {
       const totalReturnPct = costBasis > 0 ? (((curPrice - p.avgCost) * p.shares + totalIncome) / costBasis) * 100 : null;
       return { ticker: p.ticker, shares: p.shares, avgCost: p.avgCost, curPrice, optIncome, divIncome, totalIncome, adjustedAvg, pctRecovered, totalReturnPct, currency: p.currency };
     }).sort((a, b) => (b.totalReturnPct ?? -Infinity) - (a.totalReturnPct ?? -Infinity));
+    return { rows, countedById };
   }, [openPositions, openOptions, assignedOptions, closedOptions, stockTrades, tradesById, dividends, prices, lotRemainingByTradeId]);
 
   const tickerTape = [
@@ -1808,8 +1821,14 @@ export default function Dashboard({ session }) {
                 </thead>
                 <tbody>
                   {tickerAdjusted.map((r) => (
-                    <tr key={r.ticker}>
-                      <td style={{ fontWeight: 500 }}>{r.ticker}</td>
+                    <Fragment key={r.ticker}>
+                    <tr onClick={() => setExpandedTicker((cur) => (cur === r.ticker ? null : r.ticker))} style={{ cursor: "pointer" }} title="Pulsa para ver todo el historial de este ticker">
+                      <td style={{ fontWeight: 500 }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          {expandedTicker === r.ticker ? <ChevronDown size={14} color="var(--muted)" /> : <ChevronRight size={14} color="var(--muted)" />}
+                          {r.ticker}
+                        </span>
+                      </td>
                       <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{r.currency || "USD"}</td>
                       <td className="mono">{r.shares}</td>
                       <td className="mono">{fmtCur(r.avgCost, r.currency)}</td>
@@ -1821,6 +1840,23 @@ export default function Dashboard({ session }) {
                         {r.totalReturnPct == null ? "—" : `${r.totalReturnPct >= 0 ? "+" : ""}${r.totalReturnPct.toFixed(1)}%`}
                       </td>
                     </tr>
+                    {expandedTicker === r.ticker && (
+                      <tr>
+                        <td colSpan={9} style={{ borderTop: "none", padding: "0 0 14px 0" }}>
+                          <TickerHistory
+                            row={r}
+                            trades={trades.filter((t) => t.ticker === r.ticker)}
+                            dividends={dividends.filter((d) => d.ticker === r.ticker)}
+                            countedById={countedById}
+                            sellPnlById={sellPnlById}
+                            lotRemainingByTradeId={lotRemainingByTradeId}
+                            tradesById={tradesById}
+                            epochStart={currentEpochStart(stockTrades, r.ticker)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
@@ -2065,6 +2101,85 @@ export default function Dashboard({ session }) {
           tradesById={tradesById}
         />
       )}
+    </div>
+  );
+}
+
+// Historial completo de un ticker: compras, ventas, opciones (abiertas, cerradas, asignadas, roladas)
+// y dividendos en orden cronológico, indicando qué parte de cada movimiento cuenta en el $ Ajustado.
+function TickerHistory({ row, trades, dividends, countedById, sellPnlById, lotRemainingByTradeId, tradesById, epochStart }) {
+  const cur = row.currency;
+  const events = [];
+  for (const t of trades) {
+    const isOption = t.type === "option";
+    if (!isOption) {
+      const gross = t.qty * (t.price || 0);
+      const comm = t.commission || 0;
+      const remaining = lotRemainingByTradeId?.[t.id];
+      const partial = t.action === "buy" && remaining != null && remaining > 0.0001 && remaining < t.qty - 0.0001;
+      events.push({
+        key: t.id, date: t.date, kind: t.action === "buy" ? "Compra" : "Venta", color: t.action === "buy" ? "var(--text)" : "var(--gold)",
+        detail: `${t.qty} acciones @ ${fmtCur(t.price, t.currency)}${comm > 0 ? ` · comisión ${fmtCur(comm, t.currency)}` : ""}${t.notes ? ` · ${t.notes}` : ""}${partial ? ` · quedan ${remaining} de este lote` : ""}${t.action === "buy" && remaining != null && remaining <= 0.0001 ? " · lote vendido por completo" : ""}`,
+        cash: t.action === "buy" ? -(gross + comm) : gross - comm,
+        result: t.action === "sell" ? (sellPnlById[t.id] ?? null) : null,
+        counted: null, old: epochStart && t.date < epochStart,
+      });
+    } else {
+      const done = t.status === "closed" || t.status === "assigned";
+      const pnl = done ? optionPnL(t, tradesById) : null;
+      const statusTxt = t.status === "assigned" ? "Asignada" : t.status === "rolled" ? "Rolada" : t.status === "closed" ? "Cerrada" : "Abierta";
+      const settle = t.closeDate || t.date;
+      const c = countedById[t.id];
+      events.push({
+        key: t.id, date: t.date, kind: `Opción · ${statusTxt}`, color: t.status === "assigned" ? "#7EC8E3" : t.status === "rolled" ? "#C7A6F5" : "var(--text)",
+        detail: `${t.qty}× ${tradeLabel(t)}${(t.legs || []).length === 1 ? ` @ ${tradePriceLabel(t)}` : ""}${t.expiration ? ` · vence ${t.expiration}` : ""}${t.closeDate ? ` · ${statusTxt.toLowerCase()} el ${t.closeDate}` : ""}${t.notes ? ` · ${t.notes}` : ""}`,
+        cash: null,
+        result: t.status === "rolled" ? null : pnl,
+        counted: c || null, old: epochStart && settle < epochStart,
+      });
+    }
+  }
+  for (const d of dividends) {
+    events.push({ key: d.id, date: d.date, kind: "Dividendo", color: "var(--gain)", detail: d.notes || "", cash: d.amount, result: d.amount, counted: countedById[d.id] || null, old: epochStart && d.date < epochStart });
+  }
+  events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const colorOf = (n) => (n == null ? "var(--muted)" : n >= 0 ? "var(--gain)" : "var(--loss)");
+  const countedTotal = events.reduce((s, e) => s + (e.counted ? e.counted.amount : 0), 0);
+  return (
+    <div style={{ background: "var(--panel2, rgba(255,255,255,0.03))", border: "1px solid var(--border)", borderRadius: 8, margin: "4px 0 0 20px", padding: "10px 12px", cursor: "default" }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 }}>
+        Historial completo de <strong style={{ color: "var(--text)" }}>{row.ticker}</strong>.
+        {epochStart && <> El lote que tienes ahora empezó el <span className="mono">{epochStart}</span>; lo anterior aparece atenuado y no cuenta en el $ Ajustado.</>}
+        {" "}Las opciones abiertas todavía no cuentan hasta que se cierren o se asignen.
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Fecha</th><th>Movimiento</th><th>Detalle</th><th>Efectivo</th><th>Resultado</th><th>Cuenta en $ Ajustado</th></tr></thead>
+          <tbody>
+            {events.map((e) => (
+              <tr key={e.key} style={{ opacity: e.old ? 0.45 : 1 }}>
+                <td className="mono" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{e.date}</td>
+                <td style={{ fontSize: 13, color: e.color, whiteSpace: "nowrap" }}>{e.kind}</td>
+                <td style={{ fontSize: 12, color: "var(--muted)", minWidth: 220 }}>{e.detail || "—"}</td>
+                <td className="mono" style={{ fontSize: 12, color: colorOf(e.cash) }}>{e.cash == null ? "—" : fmtCur(e.cash, cur)}</td>
+                <td className="mono" style={{ fontSize: 12, color: colorOf(e.result) }}>{e.result == null ? "—" : fmtCur(e.result, cur)}</td>
+                <td className="mono" style={{ fontSize: 12 }}>
+                  {e.counted ? (
+                    <span style={{ color: colorOf(e.counted.amount) }}>
+                      {fmtCur(e.counted.amount, cur)}
+                      {e.counted.note && <div style={{ fontSize: 10, color: "var(--gold)" }}>{e.counted.note}</div>}
+                    </span>
+                  ) : <span style={{ color: "var(--muted)" }}>—</span>}
+                </td>
+              </tr>
+            ))}
+            <tr>
+              <td colSpan={5} style={{ textAlign: "right", fontSize: 12, color: "var(--muted)" }}>Total que cuenta (primas + dividendos)</td>
+              <td className="mono" style={{ fontWeight: 600, color: colorOf(countedTotal) }}>{fmtCur(countedTotal, cur)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
