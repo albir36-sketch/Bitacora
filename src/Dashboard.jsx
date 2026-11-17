@@ -187,12 +187,21 @@ function tradePriceLabel(t) {
   return legs.map((l) => fmtCur(l.price, t.currency)).join(" / ");
 }
 function legLabel(l) {
-  return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}`;
+  const exp = l.expiration ? ` · venc. ${String(l.expiration).slice(8, 10)}/${String(l.expiration).slice(5, 7)}` : "";
+  return `${l.action === "sell" ? "Venta" : "Compra"} ${l.optionType === "put" ? "Put" : "Call"} $${l.strike}${exp}`;
 }
+// Vencimiento de cada pata: el suyo propio (calendarios) o el del trade
+const legExpiration = (t, l) => l.expiration || t.expiration;
 function tradeLabel(t) {
   if (t.type === "stock") return t.action === "buy" ? "Compra" : "Venta";
   const legs = t.legs || [];
   if (legs.length <= 1) return legs[0] ? legLabel(legs[0]) : "Opción";
+  const exps = new Set(legs.map((l) => legExpiration(t, l)));
+  if (exps.size > 1) {
+    if (legs.length === 2) return "Calendario";
+    if (legs.length === 4) return "Doble calendario";
+    return `Spread con varios vencimientos (${legs.length} patas)`;
+  }
   return `Spread (${legs.length} patas)`;
 }
 // Clasifica una opción de una sola pata en una estrategia reconocible; los spreads van aparte.
@@ -212,7 +221,7 @@ function unrealizedOptionPnL(t, markPrices) {
   let perContract = 0;
   let anyMark = false;
   for (const l of legs) {
-    const occ = buildOccSymbol(t.ticker, t.expiration, l.optionType, l.strike);
+    const occ = buildOccSymbol(t.ticker, legExpiration(t, l), l.optionType, l.strike);
     const mark = occ && markPrices ? markPrices[occ] : null;
     if (mark == null) continue;
     anyMark = true;
@@ -722,7 +731,7 @@ export default function Dashboard({ session }) {
     const symbols = [];
     for (const t of optionTradesList) {
       for (const l of t.legs || []) {
-        const occ = buildOccSymbol(t.ticker, t.expiration, l.optionType, l.strike);
+        const occ = buildOccSymbol(t.ticker, legExpiration(t, l), l.optionType, l.strike);
         if (occ) symbols.push(occ);
       }
     }
@@ -2092,7 +2101,7 @@ function TradeTable({ trades, sellPnlById, markPrices, tradesById, lotRemainingB
                 <td className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{t.currency || "USD"}</td>
                 <td style={{ fontSize: 13 }}>
                   {tradeLabel(t)}
-                  {isOption && t.expiration && <div style={{ fontSize: 11, color: "var(--muted)" }}>Vence {t.expiration}</div>}
+                  {isOption && t.expiration && <div style={{ fontSize: 11, color: "var(--muted)" }}>Vence {[...new Set((t.legs || []).map((l) => legExpiration(t, l)))].sort().join(" y ") || t.expiration}</div>}
                   {t.notes && (t.notes.startsWith("Asignación") || t.notes.startsWith("Roll")) && <div style={{ fontSize: 11, color: "var(--gold)" }}>{t.notes}</div>}
                 </td>
                 <td className="mono">{t.qty}{partial && <div style={{ fontSize: 10, color: "var(--gold)" }}>quedan {remaining}</div>}</td>
@@ -2211,14 +2220,14 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency, defaultTicker, defau
   const [price, setPrice] = useState("");
   // option
   const [expiration, setExpiration] = useState("");
-  const [legs, setLegs] = useState([{ action: "sell", optionType: "call", strike: "", price: "" }]);
+  const [legs, setLegs] = useState([{ action: "sell", optionType: "call", strike: "", price: "", expiration: "" }]);
 
   function updateLeg(i, patch) {
     setLegs((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
   }
   function addLeg() {
     if (legs.length >= 4) return;
-    setLegs((prev) => [...prev, { action: "sell", optionType: "call", strike: "", price: "" }]);
+    setLegs((prev) => [...prev, { action: "sell", optionType: "call", strike: "", price: "", expiration: "" }]);
   }
   function removeLeg(i) {
     if (legs.length <= 1) return;
@@ -2232,10 +2241,17 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency, defaultTicker, defau
       if (!price) return;
       onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), price: Number(price), action, notes, commission: commissionNum, currency });
     } else {
-      if (!expiration) return;
+      if (!expiration && legs.some((l) => !l.expiration)) return;
       if (legs.some((l) => l.strike === "" || l.price === "")) return;
-      const cleanLegs = legs.map((l) => ({ action: l.action, optionType: l.optionType, strike: Number(l.strike), price: Number(l.price), closePrice: null }));
-      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum, expiration, currency });
+      // Calendarios: cada pata puede tener su propio vencimiento; el del trade es el más cercano (el de las cortas)
+      const legExps = legs.map((l) => l.expiration || expiration);
+      const multi = new Set(legExps).size > 1;
+      const cleanLegs = legs.map((l, i) => ({
+        action: l.action, optionType: l.optionType, strike: Number(l.strike), price: Number(l.price), closePrice: null,
+        ...(multi ? { expiration: legExps[i] } : {}),
+      }));
+      const tradeExpiration = [...legExps].sort()[0];
+      onSave({ type, ticker: ticker.toUpperCase().trim(), date, qty: Number(qty), legs: cleanLegs, notes, commission: commissionNum, expiration: tradeExpiration, currency });
     }
   }
 
@@ -2282,7 +2298,7 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency, defaultTicker, defau
 
         {type === "option" && (
           <div style={{ marginTop: 14 }}>
-            <div className="field-label" style={{ marginBottom: 8 }}>Patas ({legs.length}/4) — 1 pata = opción simple, 2+ = spread</div>
+            <div className="field-label" style={{ marginBottom: 8 }}>Patas ({legs.length}/4) — 1 pata = opción simple, 2+ = spread. Para calendarios, pon en cada pata su vencimiento; si lo dejas vacío usa el de arriba.</div>
             {legs.map((leg, i) => (
               <div className="leg-row" key={i}>
                 <div className="field"><div className="field-label">Acción</div>
@@ -2293,6 +2309,7 @@ function AddTradeModal({ onCancel, onSave, defaultCurrency, defaultTicker, defau
                 </div>
                 <div className="field"><div className="field-label">Strike</div><input type="number" value={leg.strike} onChange={(e) => updateLeg(i, { strike: e.target.value })} /></div>
                 <div className="field"><div className="field-label">{leg.action === "sell" ? "Prima cobrada" : "Prima pagada"}</div><input type="number" value={leg.price} onChange={(e) => updateLeg(i, { price: e.target.value })} /></div>
+                <div className="field"><div className="field-label">Vencimiento de la pata</div><input type="date" value={leg.expiration} placeholder="igual" onChange={(e) => updateLeg(i, { expiration: e.target.value })} /></div>
                 <button className="icon-btn" style={{ color: "var(--loss)" }} onClick={() => removeLeg(i)} disabled={legs.length <= 1}><Trash2 size={15} /></button>
               </div>
             ))}
