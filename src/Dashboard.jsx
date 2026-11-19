@@ -2125,18 +2125,37 @@ function TickerHistory({ row, trades, dividends, countedById, sellPnlById, lotRe
         counted: null, old: epochStart && t.date < epochStart,
       });
     } else {
-      const done = t.status === "closed" || t.status === "assigned";
-      const pnl = done ? optionPnL(t, tradesById) : null;
-      const statusTxt = t.status === "assigned" ? "Asignada" : t.status === "rolled" ? "Rolada" : t.status === "closed" ? "Cerrada" : "Abierta";
+      // Cada opción genera DOS movimientos: su apertura (en su fecha) y su cierre / roll / asignación
+      // (en la fecha de cierre), así un roll aparece en la fecha en que realmente se hizo.
+      const legs = t.legs || [];
+      const mult = t.qty * 100;
+      const openCash = legs.reduce((sum, l) => sum + legSign(l) * l.price, 0) * mult - (t.commission || 0);
+      const closeCash = -legs.reduce((sum, l) => sum + legSign(l) * (l.closePrice || 0), 0) * mult - (t.closeCommission || 0);
+      const segment = legs.reduce((sum, l) => sum + legPnL(l), 0) * mult - (t.commission || 0) - (t.closeCommission || 0);
+      const isRolled = t.status === "rolled";
+      const isAssigned = t.status === "assigned";
+      const isClosed = t.status === "closed";
       const settle = t.closeDate || t.date;
-      const c = countedById[t.id];
+      const old = epochStart && settle < epochStart;
+      const rolledFrom = t.rolledFromId ? tradesById[t.rolledFromId] : null;
+      const priceTxt = legs.length === 1 ? ` @ ${tradePriceLabel(t)}` : "";
+      const expTxt = t.expiration ? ` · vence ${t.expiration}` : "";
       events.push({
-        key: t.id, date: t.date, kind: `Opción · ${statusTxt}`, color: t.status === "assigned" ? "#7EC8E3" : t.status === "rolled" ? "#C7A6F5" : "var(--text)",
-        detail: `${t.qty}× ${tradeLabel(t)}${(t.legs || []).length === 1 ? ` @ ${tradePriceLabel(t)}` : ""}${t.expiration ? ` · vence ${t.expiration}` : ""}${t.closeDate ? ` · ${statusTxt.toLowerCase()} el ${t.closeDate}` : ""}${t.notes ? ` · ${t.notes}` : ""}`,
-        cash: null,
-        result: t.status === "rolled" ? null : pnl,
-        counted: c || null, old: epochStart && settle < epochStart,
+        key: `${t.id}-o`, date: t.date, kind: rolledFrom ? "Roll · nueva apertura" : "Opción · apertura", color: "var(--text)",
+        detail: `${t.qty}× ${tradeLabel(t)}${priceTxt}${expTxt}${t.notes ? ` · ${t.notes}` : ""}${!isRolled && !isAssigned && !isClosed ? " · sigue abierta" : ""}`,
+        cash: openCash, result: null, counted: null, old,
       });
+      if (isRolled || isAssigned || isClosed) {
+        const c = countedById[t.id];
+        const chainTxt = (isClosed || isAssigned) && rolledFrom ? ` · acumulado de toda la cadena de rolls: ${fmtCur(optionPnL(t, tradesById), t.currency)}` : "";
+        events.push({
+          key: `${t.id}-c`, date: settle,
+          kind: isRolled ? "Roll · cierre" : isAssigned ? "Asignación" : (legs.length && legs.every((l) => !l.closePrice) ? "Vencida / cerrada a 0" : "Cierre"),
+          color: isAssigned ? "#7EC8E3" : isRolled ? "#C7A6F5" : "var(--text)",
+          detail: `${legs.map((l) => `recompra a ${fmtCur(l.closePrice || 0, t.currency)}`).join(" / ")}${isRolled ? " · resultado de este tramo; el resultado total se acumula hasta que se cierre el último roll" : ""}${chainTxt}`,
+          cash: closeCash, result: segment, counted: c || null, old,
+        });
+      }
     }
   }
   for (const d of dividends) {
