@@ -23,49 +23,39 @@ const fmtDate = (iso) => {
   const [y, m, d] = String(iso).slice(0, 10).split("-");
   return `${d}/${m}/${y}`;
 };
-const fmtLongDate = (iso) =>
-  new Date(`${iso}T12:00:00`).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const signColor = (n) => (n == null || Number.isNaN(n) || n === 0 ? "var(--muted)" : n > 0 ? "var(--gain)" : "var(--loss)");
 const daysTo = (iso) => Math.round((new Date(`${iso}T00:00:00`) - new Date(new Date().toDateString())) / 86400000);
 
 const STRUCTURE = [
   ["Cartera", "10 empresas a 1.000 $ teóricos cada una (10.000 $). No se recortan las que suben ni se añade a las que caen."],
-  ["Banquillo de control", "Las candidatas no elegidas se siguen sin dinero, a partes iguales, para medir si la elección aporta algo frente al filtro."],
+  ["Banquillo de control", "Candidatas que no entraron, seguidas sin dinero a 1.000 $ cada una, para medir si la elección aporta algo."],
   ["Venta", "El dinero queda en liquidez hasta la siguiente revisión trimestral; entonces se repone con una empresa del banquillo que siga cumpliendo los criterios."],
-  ["Sectores", "Máximo 3 empresas por sector."],
+  ["Grandes cambios", "Máximo 2 empresas por cambio."],
   ["Precios", "Apertura de la sesión siguiente a la decisión, sin comisiones; los dividendos van a la liquidez."],
   ["Horizonte", "Se juzga a 5 años. Caídas del 40-50 % por el camino serán normales."],
 ];
 
 const CRITERIA = [
-  ["Universo", "Empresas de EE. UU., sin ADR. Capitalización de 1.000 a 20.000 M$ y volumen diario medio ≥ 10 M$."],
-  ["Ventas", "Crecimiento medio anual de 3 años > 25 % y último año > 20 %."],
-  ["Margen bruto", "> 50 % (> 40 % en hardware y semiconductores), o +5 puntos en 3 años."],
-  ["Dilución", "Acciones en circulación creciendo < 5 % al año."],
-  ["Caja", "Para al menos 2 años de quema, o flujo de caja libre positivo."],
-  ["Directivos", "Fundador como CEO o directivos con > 5 % del capital."],
-  ["Valoración", "Precio/ventas < 25x, solo al comprar. Si una empresa que gusta está por encima, hemos llegado tarde."],
-  ["Exclusiones", "Salidas a bolsa de menos de 2 años y biotecnológicas sin ventas. No se usan los veredictos del motor de AAI."],
+  ["Enfoque", "Primero la tesis: las mejores empresas, las más disruptivas en cómo consiguen sus objetivos, de cada gran cambio de los próximos 10-20 años. Los números solo sirven para sobrevivir."],
+  ["Grandes cambios", "Infraestructura de IA · robótica y automatización · espacio · computación cuántica · diagnóstico y medicina genética · energía nuclear y almacenamiento · vehículos autónomos y aéreos · dinero digital."],
+  ["Capitalización", "Sin límite. Se excluyen las que ya están entre las mayores del mundo (Nvidia, Tesla, SpaceX…)."],
+  ["Supervivencia", "Caja para al menos 2 años al ritmo actual de quema, o flujo de caja positivo. Liquidez suficiente. Al menos 1 año cotizando."],
+  ["Valoración", "Precio/ventas < 25x solo al comprar y solo para empresas consolidadas. A las que están empezando no se les aplica."],
+  ["Sin filtros de", "Crecimiento ni margen: dejaban fuera justo a las disruptivas."],
 ];
 
 const SELL_AUTO = [
-  "Dilución de más del 10 % en 12 meses.",
-  "Caja para menos de 12 meses sin flujo de caja libre positivo.",
+  "Dilución de más del 25 % en 12 meses.",
+  "Caja para menos de 12 meses sin flujo de caja positivo.",
   "Opa o adquisición: se vende al precio de la operación.",
-  "Crecimiento de ventas por debajo del 15 % durante 4 trimestres seguidos.",
+  "En empresas con ventas consolidadas, crecimiento por debajo del 15 % durante 4 trimestres seguidos.",
 ];
 const SELL_REVIEW = [
+  "Dilución de entre el 10 % y el 25 % en 12 meses.",
   "Crecimiento de ventas por debajo del 15 % dos trimestres seguidos.",
   "Margen bruto que cae más de 5 puntos en un año.",
   "Salida del fundador o del CEO.",
-  "Cualquier punto concreto de la tesis escrita de la empresa.",
-];
-
-const EXPORT_COLUMNS = [
-  "Name", "Ticker", "Price, Current", "Market Cap", "Sector", "Industry",
-  "Revenue Growth (1Y)", "Revenue CAGR (3Y)", "Revenue CAGR (5Y)", "Gross Profit Margin",
-  "Avg Gross Profit Margin (5y)", "Free Cash Flow", "Cash & Short Term Investments", "Revenue (TTM)",
-  "Buyback Yield", "Average Daily Volume (3M)", "Price / Sales",
+  "Cualquier condición escrita en la tesis de la empresa.",
 ];
 
 const BENCH = ["SPY", "QQQ", "ARKK"];
@@ -170,8 +160,8 @@ export default function DisruptiveExperiment({ session }) {
         <div className="eyebrow">EXPERIMENTO · EMPRESAS DISRUPTIVAS</div>
         <div className="h1">¿Encontramos la próxima Google, Meta o Nvidia?</div>
         <div className="card-sub" style={{ marginTop: 4 }}>
-          Cartera teórica de {fmtMoney(calc.capital, 0)}: {config.n_positions} empresas pequeñas o medianas con un modelo de
-          negocio disruptivo, a {fmtMoney(num(config.position_size), 0)} cada una, que se mantienen hasta que se rompe su tesis.
+          Cartera teórica de {fmtMoney(calc.capital, 0)}: {config.n_positions} empresas de los grandes cambios de los próximos 10-20 años, las más
+          disruptivas de cada uno, a {fmtMoney(num(config.position_size), 0)} cada una, que se mantienen hasta que se rompe su tesis.
           Nunca se vende por precio. Se compara con SPY, QQQ, ARKK y un banquillo de control.
         </div>
       </div>
@@ -180,27 +170,24 @@ export default function DisruptiveExperiment({ session }) {
         <div className="panel">
           <div className="card-label">Estado</div>
           <div className="card-value big" style={{ marginTop: 4 }}>
-            {reviewDays != null && reviewDays >= 0
-              ? `Selección el ${fmtDate(config.next_review)} (${reviewDays === 0 ? "hoy" : `dentro de ${reviewDays} ${reviewDays === 1 ? "día" : "días"}`})`
-              : "Pendiente de la selección"}
+            {config.pending_selection
+              ? `Selección cerrada · entradas con la apertura del ${fmtDate(config.pending_selection.entry_date)}`
+              : reviewDays != null && reviewDays >= 0
+                ? `Selección el ${fmtDate(config.next_review)}`
+                : "Pendiente de la selección"}
           </div>
-          <div className="card-sub" style={{ marginTop: 6 }}>
-            {config.next_review && <>Revisión del fin de semana que empieza el {fmtLongDate(config.next_review)}. </>}
-            Claude propone 15-20 candidatas, Rafa elige 10 y el resto pasa al banquillo de control. Las entradas se anotan
-            con la apertura del lunes siguiente.
-          </div>
-          <div className="card-label" style={{ marginTop: 16 }}>Qué hay que traer ese día</div>
-          <div className="card-sub" style={{ marginTop: 4 }}>
-            Export del filtro propio de InvestingPro (empresas de EE. UU. sin ADR, capitalización 1-20 B$) con estas columnas:
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-            {EXPORT_COLUMNS.map((c) => (
-              <span key={c} className="mono" style={{ fontSize: 12, padding: "3px 8px", border: "1px solid var(--border)", borderRadius: 6 }}>{c}</span>
-            ))}
-          </div>
-          <div className="card-sub" style={{ marginTop: 8 }}>
-            Participación de directivos, fundador al mando, número real de acciones y años desde la salida a bolsa se comprueban a mano en las candidatas.
-          </div>
+          {config.pending_selection && [["cartera", "Cartera"], ["banquillo", "Banquillo de control"]].map(([k, t]) => (
+            <div key={k} style={{ marginTop: 14 }}>
+              <div className="card-label">{t}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                {config.pending_selection.positions.filter((p) => p.book === k).map((p) => (
+                  <span key={p.ticker} title={`${p.sector}${p.thesis ? `\n\n${p.thesis}` : ""}`} style={{ fontSize: 13, padding: "3px 8px", border: "1px solid var(--border)", borderRadius: 6 }}>
+                    <span className="mono" style={{ fontWeight: 600 }}>{p.ticker}</span> <span style={{ color: "var(--muted)" }}>{p.name}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       ) : (
         <div className="cards">
@@ -231,7 +218,7 @@ export default function DisruptiveExperiment({ session }) {
                 <thead>
                   <tr>
                     <th>Empresa</th>
-                    <th>Sector</th>
+                    <th>Cambio</th>
                     <th style={th}>Entrada</th>
                     <th style={th}>Ahora</th>
                     <th style={th}>Resultado</th>
