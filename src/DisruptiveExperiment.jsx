@@ -203,7 +203,9 @@ export default function DisruptiveExperiment({ session }) {
           </div>
           <div className="card">
             <div className="card-label">Índices</div>
-            <div className="card-value big">{BENCH.map((t) => `${t} ${fmtPct(calc.idx[t], 1)}`).join(" · ")}</div>
+            <div className="card-value" style={{ display: "grid", gridTemplateColumns: "auto auto", gap: "2px 12px", justifyContent: "start" }}>
+              {BENCH.map((t) => [<span key={t} className="mono">{t}</span>, <span key={t + "v"} style={{ color: signColor(calc.idx[t]) }}>{fmtPct(calc.idx[t], 1)}</span>])}
+            </div>
             <div className="card-sub">Liquidez {fmtMoney(calc.liquid, 0)} · cerrado {fmtSigned(calc.main.closed.reduce((s, p) => s + p.pnl, 0))}</div>
           </div>
         </div>
